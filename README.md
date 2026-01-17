@@ -36,6 +36,7 @@ If you have a API change or feature request feel free to open an [Issue](https:/
 - Server-Sent Events (SSE)
 - Connection reuse
 - JA4 fingerprinting
+- Flow Control / Backpressure for large downloads
 
 
 Table of contents
@@ -53,6 +54,7 @@ Table of contents
 	* [Response Schema](#cycletls-response-schema)
 	* [Multiple Requests Example](#multiple-requests-example-for-typescript-and-javascript)
 	* [Streaming Responses](#streaming-responses-axios-style)
+	* [Flow Control (V2 Protocol)](#flow-control-v2-protocol)
 * [Local Setup](#dev-setup)
 * [QA](#questions)
 * [LICENSE](#license)
@@ -347,6 +349,98 @@ const textResponse = await cycleTLS.get('https://httpbin.org/html', {
 const textData = await textResponse.text();
 console.log(textData); // String content
 ```
+
+## Streaming & Backpressure (Default)
+
+CycleTLS v2.0.6+ uses a modern streaming protocol by default. This provides memory-efficient large file downloads with credit-based backpressure.
+
+### Basic Usage
+
+```typescript
+import CycleTLS from 'cycletls';
+
+const client = new CycleTLS();
+
+// Streaming download with backpressure
+const response = await client.get('https://example.com/large-file.zip');
+
+console.log(`Status: ${response.statusCode}`);
+console.log(`URL: ${response.finalUrl}`);
+
+// Stream body - memory stays bounded regardless of file size
+for await (const chunk of response.body) {
+  await processChunk(chunk);
+}
+
+await client.close();
+```
+
+### POST Request
+
+```typescript
+import CycleTLS from 'cycletls';
+
+const client = new CycleTLS();
+
+const response = await client.post('https://api.example.com/upload',
+  JSON.stringify({ data: 'value' }),
+  {
+    headers: { 'Content-Type': 'application/json' },
+    ja3: '771,4865-4867-4866-49195...',
+    userAgent: 'Mozilla/5.0...',
+  }
+);
+
+for await (const chunk of response.body) {
+  console.log(chunk.toString());
+}
+
+await client.close();
+```
+
+### Legacy API
+
+The original buffered API is available via the `Legacy` export for backward compatibility:
+
+```typescript
+import { Legacy } from 'cycletls';
+
+// Initialize legacy client (V1 protocol)
+const cycleTLS = await Legacy();
+
+// Standard request (entire body buffered in memory)
+const response = await cycleTLS('https://example.com/api', {
+  ja3: '771,4865-4867-4866-49195...',
+  userAgent: 'Mozilla/5.0...',
+});
+
+console.log(response.body);
+await cycleTLS.exit();
+```
+
+### When to use which API?
+
+| Use Case | Recommended | Why |
+|----------|-------------|-----|
+| Large file downloads | `new CycleTLS()` | Memory-efficient streaming |
+| Streaming responses | `new CycleTLS()` | Backpressure prevents OOM |
+| Memory-constrained environments | `new CycleTLS()` | Bounded memory usage |
+| API requests (small responses) | `Legacy()` | Simpler API, body buffered |
+| Existing code migration | `Legacy()` | No code changes needed |
+| Multiple concurrent requests | `Legacy()` | Multiplexed single connection |
+
+### CycleTLS Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `port` | number | `9119` | Server port |
+| `initialWindow` | number | `65536` | Initial credit window (bytes) |
+| `creditThreshold` | number | `initialWindow/2` | When to replenish credits |
+| `autoSpawn` | boolean | `true` | Auto-start server |
+| `debug` | boolean | `false` | Enable debug logging |
+| `timeout` | number | `30000` | Request timeout (ms) |
+
+See [FLOW_CONTROL.md](./docs/FLOW_CONTROL.md) for detailed protocol documentation.
 
 ## Example CycleTLS Request for Golang
 

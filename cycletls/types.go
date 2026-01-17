@@ -3,6 +3,7 @@
 package cycletls
 
 import (
+	"context"
 	"encoding/json"
 	nhttp "net/http"
 	"time"
@@ -95,6 +96,11 @@ type fullRequest struct {
 	sseClient *SSEClient       // For SSE connections
 	wsClient  *WebSocketClient // For WebSocket connections
 	err       error            // For early validation errors (e.g., invalid URL)
+
+	// V2 flow control fields
+	ctx     context.Context    // Parent context for cancellation
+	cancel  context.CancelFunc // Cancel function for the request
+	limiter *creditWindow      // Credit window for flow control (v2 only)
 }
 
 // CycleTLS is the main client for making requests with TLS fingerprinting.

@@ -134,6 +134,85 @@ func browserFromOptions(opts Options) Browser {
 	}
 }
 
+// buildHTTPRequest creates an HTTP request from the options with the given context.
+// This is used by both v1 and v2 code paths.
+func buildHTTPRequest(request cycleTLSRequest, ctx context.Context) (*http.Request, error) {
+	// Handle both string body and byte body
+	var bodyReader io.Reader
+	if len(request.Options.BodyBytes) > 0 {
+		bodyReader = bytes.NewReader(request.Options.BodyBytes)
+	} else {
+		bodyReader = strings.NewReader(request.Options.Body)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, strings.ToUpper(request.Options.Method), request.Options.URL, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build header order
+	headerorder := []string{}
+	if len(request.Options.HeaderOrder) > 0 {
+		for _, v := range request.Options.HeaderOrder {
+			headerorder = append(headerorder, strings.ToLower(v))
+		}
+	} else {
+		headerorder = []string{
+			"host", "connection", "cache-control", "device-memory", "viewport-width",
+			"rtt", "downlink", "ect", "sec-ch-ua", "sec-ch-ua-mobile",
+			"sec-ch-ua-full-version", "sec-ch-ua-arch", "sec-ch-ua-platform",
+			"sec-ch-ua-platform-version", "sec-ch-ua-model", "upgrade-insecure-requests",
+			"user-agent", "accept", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-user",
+			"sec-fetch-dest", "referer", "accept-encoding", "accept-language", "cookie",
+		}
+	}
+
+	// Build header order key
+	headerorderkey := []string{}
+	for _, key := range headerorder {
+		for k := range request.Options.Headers {
+			if key == strings.ToLower(k) {
+				headerorderkey = append(headerorderkey, strings.ToLower(k))
+			}
+		}
+	}
+
+	headerOrder := parseUserAgent(request.Options.UserAgent).HeaderOrder
+
+	// Set headers with ordering
+	req.Header = http.Header{
+		http.HeaderOrderKey: headerorderkey,
+	}
+
+	// Only set PHeaderOrderKey for HTTP/2, not HTTP/3
+	if !request.Options.ForceHTTP3 && request.Options.Protocol != "http3" {
+		req.Header[http.PHeaderOrderKey] = headerOrder
+	}
+
+	// Parse URL for Host header
+	u, err := url.Parse(request.Options.URL)
+	if err != nil {
+		return nil, err
+	}
+
+	// Append headers
+	for k, v := range request.Options.Headers {
+		if k != "Content-Length" {
+			req.Header.Set(k, v)
+		}
+	}
+
+	// Set Host header (respect user-provided for domain fronting)
+	if _, ok := request.Options.Headers["Host"]; !ok {
+		if _, ok := request.Options.Headers["host"]; !ok {
+			req.Header.Set("Host", u.Host)
+		}
+	}
+	req.Header.Set("user-agent", request.Options.UserAgent)
+
+	return req, nil
+}
+
 // ready Request
 func processRequest(request cycleTLSRequest) (result fullRequest) {
 	// Handle protocol-specific clients first (they build their own browser config)
@@ -1398,6 +1477,19 @@ func WSEndpoint(w nhttp.ResponseWriter, r *nhttp.Request) {
 		log.Println(body)
 
 	} else {
+		// Version routing: v=2 is now default, v=1 for legacy compatibility
+		version := r.URL.Query().Get("v")
+		if version == "1" {
+			// V1 (legacy): Multiplexed JSON protocol - use ?v=1 for backward compat
+			goto legacyHandler
+		}
+
+		// V2 (default): One WebSocket per request with flow control
+		handleWSRequestV2(ws)
+		return
+
+	legacyHandler:
+		// Legacy multiplexed JSON protocol
 		chanRead := make(chan fullRequest)
 		chanWrite := make(chan []byte)
 		safeWriter := newSafeChannelWriter(chanWrite)

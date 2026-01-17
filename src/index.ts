@@ -603,7 +603,8 @@ class SharedInstance extends EventEmitter {
 
   private createClient(resolve: () => void, reject: (reason: string) => void): void {
     const attemptConnection = () => {
-      const server = new WebSocket(`ws://localhost:${this.port}`);
+      // Use ?v=1 to request legacy JSON protocol (V2 flow-control is now default)
+      const server = new WebSocket(`ws://localhost:${this.port}?v=1`);
 
       server.on("open", () => {
         // When connected, clear the connection timeout if it exists.
@@ -1861,9 +1862,30 @@ const initCycleTLS = async (
   }
 };
 
-export default initCycleTLS;
+// V2 Modern CycleTLS (streaming with backpressure)
+export {
+  CycleTLS,
+  CycleTLSOptions,
+  RequestOptions,
+  Response,
+  CycleTLSError,
+} from "./flow-control-client";
+export { CreditManager } from "./credit-manager";
+export * as Protocol from "./protocol";
+
+// Legacy V1 client (buffered, multiplexed)
+export { initCycleTLS as Legacy };
+
+// Default export: Modern CycleTLS (V2)
+import CycleTLS from "./flow-control-client";
+export default CycleTLS;
+
 export { CycleTLSWebSocket };
-module.exports = initCycleTLS;
-module.exports.default = initCycleTLS;
+
+// CommonJS compatibility
+module.exports = CycleTLS;
+module.exports.default = CycleTLS;
+module.exports.CycleTLS = CycleTLS;
+module.exports.Legacy = initCycleTLS;
 module.exports.CycleTLSWebSocket = CycleTLSWebSocket;
 module.exports.__esModule = true;
