@@ -51,22 +51,65 @@ export interface CycleTLSOptions {
 }
 
 /**
+ * Cookie to send with the request.
+ */
+export interface RequestCookie {
+  name: string;
+  value: string;
+  path?: string;
+  domain?: string;
+}
+
+/**
  * Request options for CycleTLS requests.
  */
 export interface RequestOptions {
+  /** Target URL */
   url: string;
+  /** HTTP method (default: "GET") */
   method?: string;
+  /** Request headers */
   headers?: Record<string, string>;
+  /** Request body as string */
   body?: string;
+  /** Request body as binary data */
+  bodyBytes?: Uint8Array;
+  /** JA3 fingerprint string */
   ja3?: string;
+  /** JA4R fingerprint string */
   ja4r?: string;
+  /** User-Agent header override */
   userAgent?: string;
+  /** Proxy URL */
   proxy?: string;
+  /** Request timeout in milliseconds */
   timeout?: number;
+  /** Disable automatic redirect following */
   disableRedirect?: boolean;
+  /** Skip TLS certificate verification */
   insecureSkipVerify?: boolean;
+  /** Force HTTP/1.1 instead of HTTP/2 */
   forceHTTP1?: boolean;
+  /** Force HTTP/3 (QUIC) */
   forceHTTP3?: boolean;
+  /** HTTP/2 fingerprint string (SETTINGS frame order, priorities, etc.) */
+  http2Fingerprint?: string;
+  /** QUIC fingerprint string */
+  quicFingerprint?: string;
+  /** Disable GREASE for exact JA4 matching */
+  disableGrease?: boolean;
+  /** Custom TLS SNI (Server Name Indication) override */
+  serverName?: string;
+  /** Custom header ordering for fingerprint accuracy */
+  headerOrder?: string[];
+  /** Use header order exactly as provided (preserves insertion order) */
+  orderAsProvided?: boolean;
+  /** Cookies to send with the request */
+  cookies?: RequestCookie[];
+  /** Auto retry with TLS 1.3 compatible curves on handshake failure (default: true) */
+  tls13AutoRetry?: boolean;
+  /** Enable connection reuse for subsequent requests (default: true) */
+  enableConnectionReuse?: boolean;
 }
 
 /**
@@ -90,6 +133,8 @@ export interface RequestOptions {
 export interface Response {
   requestId: string;
   statusCode: number;
+  /** Alias for statusCode (for legacy API compatibility) */
+  status: number;
   finalUrl: string;
   headers: Record<string, string[]>;
   /** Readable stream for the response body (use for large files to preserve backpressure) */
@@ -124,6 +169,9 @@ export interface Response {
    * Note: This buffers the entire response, so use body stream directly for large responses.
    */
   buffer(): Promise<Buffer>;
+
+  /** Alias for body (for legacy API compatibility) - same as body stream */
+  data: Readable;
 }
 
 /**
@@ -575,11 +623,17 @@ export class CycleTLS extends EventEmitter {
         }
 
         // Build and send init packet
+        // Convert bodyBytes to base64 if provided (for binary data transmission)
+        const bodyBytesBase64 = options.bodyBytes
+          ? Buffer.from(options.bodyBytes).toString("base64")
+          : undefined;
+
         const requestOptions = {
           url: options.url,
           method: options.method ?? "GET",
           headers: options.headers ?? {},
           body: options.body ?? "",
+          bodyBytes: bodyBytesBase64,
           ja3: options.ja3,
           ja4r: options.ja4r,
           userAgent: options.userAgent,
@@ -589,6 +643,15 @@ export class CycleTLS extends EventEmitter {
           insecureSkipVerify: options.insecureSkipVerify,
           forceHTTP1: options.forceHTTP1,
           forceHTTP3: options.forceHTTP3,
+          http2Fingerprint: options.http2Fingerprint,
+          quicFingerprint: options.quicFingerprint,
+          disableGrease: options.disableGrease,
+          serverName: options.serverName,
+          headerOrder: options.headerOrder,
+          orderAsProvided: options.orderAsProvided,
+          cookies: options.cookies,
+          tls13AutoRetry: options.tls13AutoRetry,
+          enableConnectionReuse: options.enableConnectionReuse,
         };
 
         const initPacket = buildInitPacket(
@@ -632,6 +695,7 @@ export class CycleTLS extends EventEmitter {
               resolve({
                 requestId,
                 statusCode: response.statusCode,
+                status: response.statusCode,  // alias for legacy compatibility
                 finalUrl: response.finalUrl,
                 headers: response.headers,
                 body: bodyStream,
@@ -665,6 +729,8 @@ export class CycleTLS extends EventEmitter {
                 async buffer(): Promise<Buffer> {
                   return getBuffer();
                 },
+
+                data: bodyStream,  // alias for legacy compatibility (same reference)
               });
               break;
             }
@@ -1203,9 +1269,11 @@ export class CycleTLS extends EventEmitter {
               const sseResponse: SSEResponse = {
                 requestId,
                 statusCode: response.statusCode,
+                status: response.statusCode,  // alias for legacy compatibility
                 finalUrl: response.finalUrl,
                 headers: response.headers,
                 body: bodyStream,
+                data: bodyStream,  // alias for legacy compatibility
 
                 async json<T = unknown>(): Promise<T> {
                   const buf = await getBuffer();
