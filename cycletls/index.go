@@ -1446,8 +1446,8 @@ func readProcess(chanRead chan fullRequest, chanWrite *safeChannelWriter) {
 }
 
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+	ReadBufferSize:  65536, // 64KB buffer for large init packets
+	WriteBufferSize: 65536, // 64KB buffer for large responses
 }
 
 // WSEndpoint exports the main cycletls function as we websocket connection that clients can connect to

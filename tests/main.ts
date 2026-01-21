@@ -10,7 +10,7 @@ const { performance } = require("perf_hooks");
   for (let i = 0; i < 1; i++) {
     var t0 = performance.now();
 
-    const response = cycleTLS("http://httpbin.org/cookies", {
+    const response = cycleTLS.get("http://httpbin.org/cookies", {
       body: "",
       ja3: "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-21,29-23-24,0",
       userAgent:

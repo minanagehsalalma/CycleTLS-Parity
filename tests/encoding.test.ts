@@ -1,4 +1,4 @@
-import { initCycleTLS } from "../dist/index.js";
+import CycleTLS from "../dist/index.js";
 import { withCycleTLS } from "./test-utils.js";
 jest.setTimeout(30000);
 let ja3 =
@@ -80,10 +80,10 @@ const myRequests: Request[] = [
 ];
 
 test("Response data contains raw compressed data (Axios-style)", async () => {
-  await withCycleTLS({ port: 9115 }, async (cycleTLS) => {
+  await withCycleTLS({ port: 9115 }, async (client) => {
     for (let request of myRequests) {
       // Test with default responseType (json) - should return raw buffer for compressed data
-      const response = await cycleTLS(request.url, {
+      const response = await client.get(request.url, {
         ja3: ja3,
         userAgent: userAgent,
         headers: { 'Accept-Encoding': 'gzip, deflate, br' },
@@ -91,20 +91,21 @@ test("Response data contains raw compressed data (Axios-style)", async () => {
 
       expect(response.status).toBe(200);
 
-      // Default (json) should return raw compressed Buffer when JSON parsing fails
-      expect(response.data).toBeInstanceOf(Buffer);
-      expect(response.data.length).toBeGreaterThan(0);
+      // New API returns a Readable stream as data - consume it to get buffer
+      const buffer = await response.buffer();
+      expect(buffer).toBeInstanceOf(Buffer);
+      expect(buffer.length).toBeGreaterThan(0);
 
-      // Test with explicit arraybuffer responseType
-      const arrayBufferResponse = await cycleTLS(request.url, {
+      // Test with explicit arraybuffer method
+      const arrayBufferResponse = await client.get(request.url, {
         ja3: ja3,
         userAgent: userAgent,
         headers: { 'Accept-Encoding': 'gzip, deflate, br' },
-        responseType: 'arraybuffer'
       });
 
-      expect(arrayBufferResponse.data).toBeInstanceOf(ArrayBuffer);
-      expect(arrayBufferResponse.data.byteLength).toBeGreaterThan(0);
+      const arrayBuffer = await arrayBufferResponse.arrayBuffer();
+      expect(arrayBuffer).toBeInstanceOf(ArrayBuffer);
+      expect(arrayBuffer.byteLength).toBeGreaterThan(0);
     }
   });
 });

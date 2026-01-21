@@ -1,20 +1,20 @@
-const initCycleTLS = require("../dist/index.js");
+const { CycleTLS } = require("../dist/index.js");
 
 describe("HTTP/2 Fingerprinting Tests", () => {
-  let cycleTLS;
+  let client;
 
   beforeAll(async () => {
-    cycleTLS = await initCycleTLS({ port: 9121 });
+    client = new CycleTLS({ port: 9121 });
   });
 
   afterAll(async () => {
-    await cycleTLS.exit();
+    await client.close();
   });
 
   test("Firefox HTTP/2 fingerprint with peet.ws", async () => {
     const firefoxHTTP2 = "1:65536;2:0;4:131072;5:16384|12517377|0|m,p,a,s";
     
-    const response = await cycleTLS.get('https://tls.peet.ws/api/all', {
+    const response = await client.get('https://tls.peet.ws/api/all', {
       http2Fingerprint: firefoxHTTP2,
       userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:141.0) Gecko/20100101 Firefox/141.0'
     });
@@ -32,7 +32,7 @@ describe("HTTP/2 Fingerprinting Tests", () => {
   test("Chrome HTTP/2 fingerprint with peet.ws", async () => {
     const chromeHTTP2 = "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p";
     
-    const response = await cycleTLS.get('https://tls.peet.ws/api/all', {
+    const response = await client.get('https://tls.peet.ws/api/all', {
       http2Fingerprint: chromeHTTP2,
       userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
     });
@@ -50,7 +50,7 @@ describe("HTTP/2 Fingerprinting Tests", () => {
   test("Firefox HTTP/2 fingerprint with scrapfly.io", async () => {
     const firefoxHTTP2 = "1:65536;2:0;4:131072;5:16384|12517377|0|m,p,a,s";
     
-    const response = await cycleTLS.get('https://tools.scrapfly.io/api/fp/anything', {
+    const response = await client.get('https://tools.scrapfly.io/api/fp/anything', {
       http2Fingerprint: firefoxHTTP2,
       userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:141.0) Gecko/20100101 Firefox/141.0'
     });
@@ -68,7 +68,7 @@ describe("HTTP/2 Fingerprinting Tests", () => {
   test("Chrome HTTP/2 fingerprint with scrapfly.io", async () => {
     const chromeHTTP2 = "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p";
     
-    const response = await cycleTLS.get('https://tools.scrapfly.io/api/fp/anything', {
+    const response = await client.get('https://tools.scrapfly.io/api/fp/anything', {
       http2Fingerprint: chromeHTTP2,
       userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
     });

@@ -1,21 +1,21 @@
-const initCycleTLS = require("../dist/index.js");
+const { CycleTLS } = require("../dist/index.js");
 
 describe("Streaming Response Tests", () => {
-  let cycleTLS;
+  let client;
 
   beforeAll(async () => {
-    cycleTLS = await initCycleTLS({ port: 9118 });
+    client = new CycleTLS({ port: 9118 });
   }, 20000);
 
   afterAll(async () => {
-    if (cycleTLS) {
-      await cycleTLS.exit();
+    if (client) {
+      await client.close();
     }
   });
 
   describe("Live streaming with responseType: 'stream'", () => {
     test("Should stream data from httpbin /stream endpoint", async () => {
-      const response = await cycleTLS('https://httpbin.org/stream/3', {
+      const response = await client.get('https://httpbin.org/stream/3', {
         responseType: 'stream',
         ja3: '771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0',
         userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0',
@@ -73,7 +73,7 @@ describe("Streaming Response Tests", () => {
     });
 
     test("Should stream data from httpbin /stream endpoint multiple calls", async () => {
-      const response = await cycleTLS('https://httpbin.org/stream/2', {
+      const response = await client.get('https://httpbin.org/stream/2', {
         responseType: 'stream',
         ja3: '771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0',
         userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0',
@@ -126,7 +126,7 @@ describe("Streaming Response Tests", () => {
     }, 5000);
 
     test("Should provide working response methods for streams", async () => {
-      const response = await cycleTLS('https://httpbin.org/stream/1', {
+      const response = await client.get('https://httpbin.org/stream/1', {
         responseType: 'stream',
         ja3: '771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0',
         userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0',
@@ -167,38 +167,45 @@ describe("Streaming Response Tests", () => {
     });
   });
 
-  describe("Backward compatibility - non-stream responses", () => {
-    test("Should work normally with responseType: 'json'", async () => {
-      const response = await cycleTLS('https://httpbin.org/json', {
-        responseType: 'json',
+  describe("Response data access patterns", () => {
+    test("Should provide json() method for JSON responses", async () => {
+      const response = await client.get('https://httpbin.org/json', {
         ja3: '771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0',
         userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0',
       });
 
       expect(response.status).toBe(200);
-      expect(typeof response.data).toBe('object');
-      expect(response.data).toHaveProperty('slideshow');
-      
-      // Response methods should still work
+
+      // V2 API: response.data is always a stream
+      expect(typeof response.data.on).toBe('function');
+
+      // Use json() method to get parsed JSON
       const jsonData = await response.json();
-      expect(jsonData).toEqual(response.data);
+      expect(typeof jsonData).toBe('object');
+      expect(jsonData).toHaveProperty('slideshow');
     });
 
-    test("Should work normally with default responseType", async () => {
-      const response = await cycleTLS('https://httpbin.org/json', {
+    test("Should provide data as stream by default", async () => {
+      const response = await client.get('https://httpbin.org/json', {
         ja3: '771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0',
         userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0',
       });
 
       expect(response.status).toBe(200);
-      expect(typeof response.data).toBe('object');
-      expect(response.data).toHaveProperty('slideshow');
+
+      // V2 API: response.data is always a Readable stream (same as response.body)
+      expect(typeof response.data.on).toBe('function');
+      expect(typeof response.data.pipe).toBe('function');
+
+      // Can consume via json() method
+      const jsonData = await response.json();
+      expect(jsonData).toHaveProperty('slideshow');
     });
   });
 
   describe("Stream event handling", () => {
     test("Should emit proper events in order", async () => {
-      const response = await cycleTLS('https://httpbin.org/stream/2', {
+      const response = await client.get('https://httpbin.org/stream/2', {
         responseType: 'stream',
         ja3: '771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0',
         userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0',
@@ -249,7 +256,7 @@ describe("Streaming Response Tests", () => {
   describe("Error handling", () => {
     test("Should handle streaming errors gracefully", async () => {
       try {
-        const response = await cycleTLS('https://httpbin.org/status/404', {
+        const response = await client.get('https://httpbin.org/status/404', {
           responseType: 'stream',
           ja3: '771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0',
           userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0',

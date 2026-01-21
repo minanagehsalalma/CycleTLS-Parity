@@ -137,75 +137,99 @@ func TestIssue407ConcurrentConnectionReuse(t *testing.T) {
 	t.Log("✅ Issue #407 test passed - no panics or port binding errors with concurrent connection reuse")
 }
 
-// TestIssue407StressTest is a more aggressive stress test
-// This test verifies that concurrent requests don't panic or cause data races
-// Note: Uses multiple clients because httptest.NewTLSServer doesn't support HTTP/2 multiplexing properly
+// TestIssue407StressTest is a stress test for HTTP/2 multiplexing with connection reuse.
+// This test verifies that ONE client can handle MANY truly concurrent requests
+// via HTTP/2 multiplexing (multiple streams on a single TCP connection).
+//
+// The original issue #407 was about race conditions with EnableConnectionReuse: true and concurrent requests,
+// causing panics like "send on closed channel" and "dialTLS returned no error when determining cached transports".
+// The fix added safeChannelWriter with mutex protection.
+//
+// This test uses httpbin.org (public HTTP/2 server) instead of httptest.NewTLSServer,
+// enabling true multiplexing behavior where multiple requests share one connection.
 func TestIssue407StressTest(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping stress test in short mode")
 	}
 
-	// Create a test server
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(5 * time.Millisecond)
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-	}))
-	defer server.Close()
+	// Use httpbin.org - a public HTTP/2 test server
+	// Unlike httptest.NewTLSServer (HTTP/1.1 only), this enables true HTTP/2 multiplexing
+	// Note: tlsfingerprint.com is preferred but may be behind Cloudflare rate limits
+	const targetURL = "https://httpbin.org/get"
 
-	const NUM_CONCURRENT_REQUESTS = 10
+	// ONE client - critical for testing connection reuse and HTTP/2 multiplexing
+	// All concurrent requests should share the same underlying TCP connection
+	client := cycletls.Init(cycletls.WithRawBytes())
+	defer client.Close()
 
 	options := cycletls.Options{
-		Ja3:                "771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0",
-		UserAgent:          "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0",
-		InsecureSkipVerify: true,
-		// Note: Each client gets its own connection to avoid HTTP/2 multiplexing issues with httptest
+		// Chrome 120 JA3 fingerprint
+		Ja3:                   "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24,0",
+		UserAgent:             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		EnableConnectionReuse: true, // CRITICAL: Enables HTTP/2 multiplexing - the fix for issue #407
 	}
 
-	// Create multiple clients to simulate concurrent usage (like the original issue #407 scenario)
-	// This avoids HTTP/2 multiplexing issues with httptest.NewTLSServer
-	clients := make([]cycletls.CycleTLS, NUM_CONCURRENT_REQUESTS)
-	for i := 0; i < NUM_CONCURRENT_REQUESTS; i++ {
-		clients[i] = cycletls.Init(cycletls.WithRawBytes())
-		defer clients[i].Close()
-	}
+	// Test configuration:
+	// - 30 truly concurrent requests through ONE client
+	// - No staggering - all requests fire simultaneously
+	// - This exercises HTTP/2 multiplexing: multiple streams on one TCP connection
+	// - The safeChannelWriter must handle all concurrent writes without race conditions
+	const NUM_CONCURRENT_REQUESTS = 30
 
-	// Fire off concurrent requests
 	var wg sync.WaitGroup
-	errors := make(chan error, NUM_CONCURRENT_REQUESTS)
+	results := make(chan error, NUM_CONCURRENT_REQUESTS)
 
+	// Fire ALL requests simultaneously - no staggering
+	// With HTTP/2 multiplexing, these become concurrent streams on one connection
+	startTime := time.Now()
 	for i := 0; i < NUM_CONCURRENT_REQUESTS; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			// Small stagger to reduce simultaneous connection attempts
-			time.Sleep(time.Duration(idx) * time.Millisecond)
-			resp, err := clients[idx].Do(server.URL, options, "GET")
+
+			resp, err := client.Do(targetURL, options, "GET")
 			if err != nil {
-				errors <- fmt.Errorf("request %d failed: %w", idx, err)
+				results <- fmt.Errorf("request %d failed: %w", idx, err)
 				return
 			}
 			if resp.Status != 200 {
-				errors <- fmt.Errorf("request %d: unexpected status %d", idx, resp.Status)
+				results <- fmt.Errorf("request %d: unexpected status %d", idx, resp.Status)
+				return
 			}
+			results <- nil // success
 		}(i)
 	}
 
 	wg.Wait()
-	close(errors)
+	totalDuration := time.Since(startTime)
+	close(results)
 
-	// Check for errors - all requests should succeed
-	errorCount := 0
-	for err := range errors {
-		errorCount++
-		t.Errorf("Stress test error: %v", err)
+	// Count results
+	var successCount, errorCount int
+	for err := range results {
+		if err != nil {
+			errorCount++
+			t.Logf("Request error: %v", err)
+		} else {
+			successCount++
+		}
 	}
 
+	t.Logf("=== HTTP/2 Multiplexing Stress Test Results ===")
+	t.Logf("Target: %s (HTTP/2 enabled)", targetURL)
+	t.Logf("Concurrent Requests: %d", NUM_CONCURRENT_REQUESTS)
+	t.Logf("Successful: %d", successCount)
+	t.Logf("Errors: %d", errorCount)
+	t.Logf("Total Duration: %v", totalDuration)
+	t.Logf("Avg per request: %v", totalDuration/time.Duration(NUM_CONCURRENT_REQUESTS))
+
+	// The key test: We completed without panics.
+	// Issue #407 caused panics like "send on closed channel" - if we get here, the fix works.
 	if errorCount > 0 {
-		t.Fatalf("Stress test failed with %d errors", errorCount)
+		t.Fatalf("Stress test failed: %d errors out of %d requests", errorCount, NUM_CONCURRENT_REQUESTS)
 	}
 
-	t.Logf("✅ Stress test passed - all %d concurrent requests succeeded (no panics or data races)", NUM_CONCURRENT_REQUESTS)
+	t.Logf("HTTP/2 multiplexing stress test passed - all %d concurrent requests from ONE client succeeded (no panics)", NUM_CONCURRENT_REQUESTS)
 }
 
 // TestIssue407ConnectionReusePerformance validates that connection reuse provides performance benefits

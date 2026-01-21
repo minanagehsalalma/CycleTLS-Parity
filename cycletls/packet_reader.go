@@ -10,7 +10,9 @@ import (
 
 // MaxStringLen defines the maximum allowed length for a string.
 // This protects against malformed or malicious packets.
-const MaxStringLen = 4096
+// Set to max uint16 value (65535) since the protocol uses 2-byte length encoding.
+// For bodies larger than ~48KB (before base64), consider chunking or streaming.
+const MaxStringLen = 65535
 
 // ErrStringTooLarge is returned when a string length exceeds MaxStringLen.
 var ErrStringTooLarge = errors.New("packet: string length exceeds limit")

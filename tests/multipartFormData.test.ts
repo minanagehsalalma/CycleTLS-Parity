@@ -1,16 +1,18 @@
-import initCycleTLS, { CycleTLSClient } from "../dist/index.js";
+import CycleTLS from "../dist/index.js";
 import FormData from "form-data";
 import fs from "fs";
+import { createSuiteInstance } from "./test-utils.js";
 
 describe("CycleTLS Multipart Form Data Test", () => {
-  let cycleTLS: CycleTLSClient;
+  let client: CycleTLS;
+  let cleanup: () => Promise<void>;
 
-  beforeAll(async () => {
-    cycleTLS = await initCycleTLS({ port: 9160, timeout: 30000 });
+  beforeAll(() => {
+    ({ instance: client, cleanup } = createSuiteInstance({ port: 9160, timeout: 30000 }));
   });
 
   afterAll(async () => {
-    await cycleTLS.exit();
+    await cleanup();
   });
 
   test("Should Handle Multipart Form Data Correctly", async () => {
@@ -18,18 +20,17 @@ describe("CycleTLS Multipart Form Data Test", () => {
     formData.append("key1", "value1");
     formData.append("key2", "value2");
 
-    const response = await cycleTLS(
+    const response = await client.post(
       "http://httpbin.org/post",
+      formData.getBuffer().toString(),
       {
-        body: formData,
         headers: formData.getHeaders(),
-      },
-      "post"
+      }
     );
 
-    expect(response.status).toBe(200); // Check if the status code is 200
+    expect(response.status).toBe(200);
 
-    const responseBody = await response.json();
+    const responseBody = await response.json() as { form: { key1: string; key2: string } };
 
     // Validate the 'form' part of the response
     expect(responseBody.form).toEqual({
@@ -40,24 +41,24 @@ describe("CycleTLS Multipart Form Data Test", () => {
 
   test("Should Handle Multipart Form Data with File Upload Correctly", async () => {
     const formData = new FormData();
-    const fileStream = fs.createReadStream("./main.go");
-    formData.append("file", fileStream);
+    const fileContent = fs.readFileSync("./main.go");
+    formData.append("file", fileContent, { filename: "main.go" });
 
-    const response = await cycleTLS(
+    const response = await client.post(
       "http://httpbin.org/post",
+      formData.getBuffer().toString(),
       {
-        body: formData,
         headers: formData.getHeaders(),
-      },
-      "post"
+      }
     );
 
     expect(response.status).toBe(200);
 
     const responseBody = await response.json();
 
-    expect(responseBody.files).toBeDefined();
-    expect(responseBody.files.file).toContain(
+    const body = responseBody as { files: { file: string } };
+    expect(body.files).toBeDefined();
+    expect(body.files.file).toContain(
       "imports locally per go.mod"
     );
   });

@@ -262,7 +262,7 @@ const CycleTLS = require('cycletls').default;
 
 ## Streaming Responses (Axios-style)
 
-CycleTLS supports axios-compatible streaming responses for real-time data processing:
+CycleTLS supports axios-compatible streaming responses for real-time data processing. In the streaming client, `response.data` is always a Readable stream (alias of `response.body`), and `responseType: 'stream'` is optional for compatibility.
 
 ### Basic Streaming Example
 
@@ -275,13 +275,16 @@ const CycleTLS = require('cycletls').default;
 
   // Get streaming response
   const response = await client.get('https://httpbin.org/stream/3', {
+    responseType: 'stream',
     headers: { Authorization: 'Bearer your_token_here' },
     ja3: '771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0',
     userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0'
   });
 
+  console.log('Status:', response.status);
+
   // Stream body chunks as they arrive
-  for await (const chunk of response.body) {
+  for await (const chunk of response.data) {
     console.log('Received chunk:', chunk.toString());
   }
 
@@ -301,16 +304,17 @@ const CycleTLS = require('cycletls').default;
 
   try {
     const response = await client.get('https://httpbin.org/drip?numbytes=100&duration=2', {
+      responseType: 'stream',
       ja3: '771,4865-4867-4866-49195-49199-52393-52392-49196-49200-49162-49161-49171-49172-51-57-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-21,29-23-24-25-256-257,0',
       userAgent: 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0',
     });
 
-    console.log('Status:', response.statusCode);
+    console.log('Status:', response.status);
     console.log('Headers:', response.headers);
 
     const chunks = [];
 
-    for await (const chunk of response.body) {
+    for await (const chunk of response.data) {
       chunks.push(chunk);
       console.log(`Received ${chunk.length} bytes`);
     }
@@ -589,23 +593,23 @@ const client = new CycleTLS(options?: CycleTLSOptions);
 
 // HTTP Methods
 client.request(options: RequestOptions): Promise<Response>
-client.get(url: string, options?: RequestOptions): Promise<Response>
-client.post(url: string, body?: string, options?: RequestOptions): Promise<Response>
-client.put(url: string, body?: string, options?: RequestOptions): Promise<Response>
-client.delete(url: string, options?: RequestOptions): Promise<Response>
-client.patch(url: string, body?: string, options?: RequestOptions): Promise<Response>
-client.head(url: string, options?: RequestOptions): Promise<Response>
-client.options(url: string, options?: RequestOptions): Promise<Response>
-client.trace(url: string, options?: RequestOptions): Promise<Response>
-client.connect(url: string, options?: RequestOptions): Promise<Response>
+client.get(url: string, options?: Omit<RequestOptions, "url" | "method">): Promise<Response>
+client.post(url: string, body: string, options?: Omit<RequestOptions, "url" | "method" | "body">): Promise<Response>
+client.put(url: string, body?: string, options?: Omit<RequestOptions, "url" | "method" | "body">): Promise<Response>
+client.delete(url: string, options?: Omit<RequestOptions, "url" | "method">): Promise<Response>
+client.patch(url: string, body?: string, options?: Omit<RequestOptions, "url" | "method" | "body">): Promise<Response>
+client.head(url: string, options?: Omit<RequestOptions, "url" | "method">): Promise<Response>
+client.options(url: string, options?: Omit<RequestOptions, "url" | "method">): Promise<Response>
+client.trace(url: string, options?: Omit<RequestOptions, "url" | "method">): Promise<Response>
+client.connect(url: string, options?: Omit<RequestOptions, "url" | "method">): Promise<Response>
 
 // WebSocket (returns event-emitter matching 'ws' library API)
-client.ws(url: string, options?: RequestOptions): Promise<CycleTLSWebSocket>
-client.webSocket(url: string, options?: RequestOptions): Promise<CycleTLSWebSocket>
+client.ws(url: string, options?: Omit<RequestOptions, "url">): Promise<CycleTLSWebSocketV2>
+client.webSocket(url: string, options?: Omit<RequestOptions, "url">): Promise<CycleTLSWebSocketV2>
 
 // Server-Sent Events (returns async iterator for events)
-client.sse(url: string, options?: RequestOptions): Promise<SSEResponse>
-client.eventSource(url: string, options?: RequestOptions): Promise<SSEResponse>
+client.sse(url: string, options?: Omit<RequestOptions, "url">): Promise<SSEResponse>
+client.eventSource(url: string, options?: Omit<RequestOptions, "url">): Promise<SSEResponse>
 
 // Cleanup
 client.close(): Promise<void>
@@ -628,25 +632,46 @@ client.close(): Promise<void>
 | `url` | string | Request URL (required) |
 | `method` | string | HTTP method |
 | `headers` | Record<string, string> | Request headers |
-| `body` | string | Request body |
+| `body` | string | Request body (UTF-8) |
+| `bodyBytes` | Uint8Array | Binary request body |
 | `ja3` | string | JA3 fingerprint |
 | `ja4r` | string | JA4 raw fingerprint |
 | `userAgent` | string | User agent string |
 | `proxy` | string | Proxy URL |
-| `timeout` | number | Request timeout (ms) |
+| `timeout` | number | Connection timeout until headers arrive (ms) |
+| `readTimeout` | number | Body stream idle timeout (ms) |
 | `disableRedirect` | boolean | Disable redirect following |
 | `insecureSkipVerify` | boolean | Skip TLS verification |
 | `forceHTTP1` | boolean | Force HTTP/1.1 |
 | `forceHTTP3` | boolean | Force HTTP/3 |
+| `http2Fingerprint` | string | HTTP/2 fingerprint |
+| `quicFingerprint` | string | QUIC fingerprint |
+| `disableGrease` | boolean | Disable GREASE for exact JA4 matching |
+| `serverName` | string | Override TLS SNI |
+| `headerOrder` | string[] | Custom header order |
+| `orderAsProvided` | boolean | Preserve header insertion order |
+| `cookies` | RequestCookie[] | Cookies to send |
+| `tls13AutoRetry` | boolean | Auto retry TLS 1.3 handshake |
+| `enableConnectionReuse` | boolean | Reuse connections (default: true) |
+
+**RequestCookie:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Cookie name |
+| `value` | string | Cookie value |
+| `path` | string | Cookie path (optional) |
+| `domain` | string | Cookie domain (optional) |
 
 **Response:**
 | Property/Method | Type | Description |
 |-----------------|------|-------------|
 | `requestId` | string | Unique request identifier |
 | `statusCode` | number | HTTP status code |
+| `status` | number | Alias for `statusCode` (axios-style) |
 | `finalUrl` | string | Final URL after redirects |
 | `headers` | Record<string, string[]> | Response headers |
 | `body` | Readable | Streaming response body |
+| `data` | Readable | Alias for `body` (stream) |
 | `json<T>()` | Promise<T> | Parse body as JSON |
 | `text()` | Promise<string> | Get body as text |
 | `buffer()` | Promise<Buffer> | Get body as Buffer |
@@ -812,14 +837,14 @@ client := &http.Client{Transport: transport}
 |---------|---------------------------|----------------------------|
 | Import | `import CycleTLS from 'cycletls'` | `import { initCycleTLS } from 'cycletls'` |
 | Init | `new CycleTLS()` | `await initCycleTLS()` |
-| Response body | Stream (`Readable`) + helpers | Buffered (`string`) |
-| Status property | `statusCode` | `status` |
+| Response body | Stream (`body`, alias `data`) + helpers | Buffered (`string`) |
+| Status property | `statusCode` (alias `status`) | `status` |
 | Memory usage | Bounded (backpressure) | Unbounded for large files |
 | Cleanup | `client.close()` | `cycleTLS.exit()` |
 | WebSocket | ✅ `client.ws()` (EventEmitter API) | `cycleTLS.ws()` |
 | SSE | ✅ `client.sse()` (async iterator) | `cycleTLS.sse()` |
 | HTTP Methods | All 9 methods | All 9 methods |
-| Response helpers | `.json()`, `.text()`, `.buffer()` | `.json()`, `.text()` |
+| Response helpers | `.json()`, `.text()`, `.buffer()`, `.arrayBuffer()`, `.blob()` | `.json()`, `.text()`, `.arrayBuffer()`, `.blob()` |
 
 ## CycleTLS Request Config
 

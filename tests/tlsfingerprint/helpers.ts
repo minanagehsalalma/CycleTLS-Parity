@@ -11,6 +11,7 @@
 
 import * as zlib from "zlib";
 import { promisify } from "util";
+import * as https from "https";
 
 // Promisified decompression functions
 const gunzip = promisify(zlib.gunzip);
@@ -20,6 +21,69 @@ const brotliDecompress = promisify(zlib.brotliDecompress);
 
 // Target server for all tests
 export const TEST_SERVER_URL = "https://tlsfingerprint.com";
+
+// Cache for service availability check
+let serviceAvailable: boolean | null = null;
+
+/**
+ * Check if tlsfingerprint.com is available
+ * Returns true if service returns 200, false otherwise (e.g., 521 Cloudflare error)
+ */
+export async function isServiceAvailable(): Promise<boolean> {
+  if (serviceAvailable !== null) {
+    return serviceAvailable;
+  }
+
+  return new Promise((resolve) => {
+    let resolved = false;
+    const complete = (result: boolean) => {
+      if (!resolved) {
+        resolved = true;
+        serviceAvailable = result;
+        resolve(result);
+      }
+    };
+
+    const timeout = setTimeout(() => {
+      complete(false);
+    }, 5000); // Shorter timeout
+
+    // Allow self-signed certificates for the test server
+    const req = https.get(`${TEST_SERVER_URL}/get`, { rejectUnauthorized: false }, (res) => {
+      clearTimeout(timeout);
+      const result = res.statusCode === 200;
+      // Consume response data to properly close connection
+      res.on('data', () => {});
+      res.on('end', () => {
+        complete(result);
+      });
+      res.on('error', () => {
+        complete(false);
+      });
+    });
+
+    req.on('error', () => {
+      clearTimeout(timeout);
+      complete(false);
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      complete(false);
+    });
+
+    req.setTimeout(5000);
+  });
+}
+
+/**
+ * Helper to skip test if service is unavailable
+ */
+export function skipIfServiceUnavailable(): void {
+  if (serviceAvailable === false) {
+    throw new Error('tlsfingerprint.com is unavailable (received 521 or timeout)');
+  }
+}
 
 // Common JA3 fingerprint for all tests (Chrome 120)
 export const DEFAULT_JA3 =
@@ -104,6 +168,8 @@ export function getDefaultOptions() {
   return {
     ja3: DEFAULT_JA3,
     userAgent: DEFAULT_USER_AGENT,
+    // tlsfingerprint.com uses a self-signed certificate
+    insecureSkipVerify: true,
   };
 }
 

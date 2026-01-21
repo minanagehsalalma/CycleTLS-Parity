@@ -82,8 +82,14 @@ export interface RequestOptions {
   userAgent?: string;
   /** Proxy URL */
   proxy?: string;
-  /** Request timeout in milliseconds */
+  /** Request timeout in milliseconds (time until headers arrive) */
   timeout?: number;
+  /**
+   * Read timeout in milliseconds (time for body streaming after headers arrive).
+   * If not specified, no read timeout is applied and streams can hang indefinitely
+   * if the server stalls mid-body. Recommended for large file downloads.
+   */
+  readTimeout?: number;
   /** Disable automatic redirect following */
   disableRedirect?: boolean;
   /** Skip TLS certificate verification */
@@ -598,6 +604,13 @@ export class CycleTLS extends EventEmitter {
         read() {},
       });
 
+      // Attach an error handler to prevent unhandled error events
+      // The actual error is handled by rejecting the promise
+      bodyStream.on("error", () => {
+        // Error is already handled by promise rejection, this just prevents
+        // Node.js from emitting an unhandled error event
+      });
+
       // Credit manager for backpressure
       const creditManager = new CreditManager(
         this.creditThreshold,
@@ -609,13 +622,36 @@ export class CycleTLS extends EventEmitter {
         }
       );
 
-      // Timeout handling
-      const timeoutId = setTimeout(() => {
+      // Timeout handling:
+      // - Use per-request timeout if provided, otherwise fall back to client-level timeout
+      // - This timeout fires if headers don't arrive in time (initial connection timeout)
+      const effectiveTimeout = options.timeout ?? this.timeout;
+      let timeoutId: ReturnType<typeof setTimeout> | null = setTimeout(() => {
         if (!resolved) {
           ws.close();
           reject(new CycleTLSError("Request timeout", 408, requestId));
         }
-      }, this.timeout);
+      }, effectiveTimeout);
+
+      // Read timeout handling:
+      // - If readTimeout is specified, start a new timer after headers arrive
+      // - This prevents streams from hanging indefinitely if server stalls mid-body
+      let readTimeoutId: ReturnType<typeof setTimeout> | null = null;
+      const clearReadTimeout = (): void => {
+        if (readTimeoutId !== null) {
+          clearTimeout(readTimeoutId);
+          readTimeoutId = null;
+        }
+      };
+      const resetReadTimeout = (): void => {
+        clearReadTimeout();
+        if (options.readTimeout !== undefined && options.readTimeout > 0) {
+          readTimeoutId = setTimeout(() => {
+            ws.close();
+            bodyStream.destroy(new CycleTLSError("Read timeout", 408, requestId));
+          }, options.readTimeout);
+        }
+      };
 
       ws.on("open", () => {
         if (this.debug) {
@@ -675,7 +711,13 @@ export class CycleTLS extends EventEmitter {
             case "response": {
               const response = parseResponsePayload(frame.payload);
               resolved = true;
-              clearTimeout(timeoutId);
+              // Clear the initial timeout (headers arrived)
+              if (timeoutId !== null) {
+                clearTimeout(timeoutId);
+                timeoutId = null;
+              }
+              // Start the read timeout if configured (for body streaming)
+              resetReadTimeout();
 
               // Create a buffered copy for convenience methods
               // The buffer is lazily populated when first needed
@@ -739,10 +781,14 @@ export class CycleTLS extends EventEmitter {
               const chunk = parseDataPayload(frame.payload);
               bodyStream.push(chunk);
               creditManager.onDataReceived(chunk.length);
+              // Reset read timeout on each chunk (server is still sending data)
+              resetReadTimeout();
               break;
             }
 
             case "end": {
+              // Clear read timeout - transfer complete
+              clearReadTimeout();
               bodyStream.push(null);
               ws.close();
               break;
@@ -750,9 +796,13 @@ export class CycleTLS extends EventEmitter {
 
             case "error": {
               const error = parseErrorPayload(frame.payload);
+              clearReadTimeout();
               if (!resolved) {
                 resolved = true;
-                clearTimeout(timeoutId);
+                if (timeoutId !== null) {
+                  clearTimeout(timeoutId);
+                  timeoutId = null;
+                }
                 reject(
                   new CycleTLSError(error.message, error.statusCode, requestId)
                 );
@@ -766,29 +816,41 @@ export class CycleTLS extends EventEmitter {
               console.warn(`Unknown frame method: ${frame.method}`);
           }
         } catch (err) {
+          clearReadTimeout();
           if (!resolved) {
             resolved = true;
-            clearTimeout(timeoutId);
+            if (timeoutId !== null) {
+              clearTimeout(timeoutId);
+              timeoutId = null;
+            }
             reject(err);
           }
         }
       });
 
       ws.on("error", (err) => {
+        clearReadTimeout();
         if (!resolved) {
           resolved = true;
-          clearTimeout(timeoutId);
+          if (timeoutId !== null) {
+            clearTimeout(timeoutId);
+            timeoutId = null;
+          }
           reject(new CycleTLSError(err.message, 0, requestId));
         }
       });
 
       ws.on("close", () => {
+        clearReadTimeout();
         if (this.debug) {
           console.log(`[CycleTLS] WebSocket closed for ${requestId}`);
         }
         if (!resolved) {
           resolved = true;
-          clearTimeout(timeoutId);
+          if (timeoutId !== null) {
+            clearTimeout(timeoutId);
+            timeoutId = null;
+          }
           reject(new CycleTLSError("Connection closed", 0, requestId));
         }
       });
@@ -919,12 +981,14 @@ export class CycleTLS extends EventEmitter {
     return new Promise((resolve, reject) => {
       let connected = false;
 
+      // Use per-request timeout if provided, otherwise fall back to client-level timeout
+      const effectiveTimeout = options.timeout ?? this.timeout;
       const timeoutId = setTimeout(() => {
         if (!connected) {
           wsClient.close();
           reject(new CycleTLSError("WebSocket connection timeout", 408, requestId));
         }
-      }, this.timeout);
+      }, effectiveTimeout);
 
       wsClient.on("open", () => {
         if (this.debug) {
@@ -1100,6 +1164,13 @@ export class CycleTLS extends EventEmitter {
         read() {},
       });
 
+      // Attach an error handler to prevent unhandled error events
+      // The actual error is handled by rejecting the promise
+      bodyStream.on("error", () => {
+        // Error is already handled by promise rejection, this just prevents
+        // Node.js from emitting an unhandled error event
+      });
+
       // Event emitter for SSE events
       const eventEmitter = new EventEmitter();
 
@@ -1201,12 +1272,14 @@ export class CycleTLS extends EventEmitter {
         }
       );
 
+      // Use per-request timeout if provided, otherwise fall back to client-level timeout
+      const effectiveTimeout = options.timeout ?? this.timeout;
       const timeoutId = setTimeout(() => {
         if (!resolved) {
           ws.close();
           reject(new CycleTLSError("SSE connection timeout", 408, requestId));
         }
-      }, this.timeout);
+      }, effectiveTimeout);
 
       ws.on("open", () => {
         const requestOptions = {

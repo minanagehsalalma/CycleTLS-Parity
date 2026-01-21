@@ -1,14 +1,19 @@
-import { initCycleTLS, CycleTLSClient } from "../dist/index.js";
+import CycleTLS from "../dist/index.js";
 import { Readable } from "stream";
 
+export { CycleTLS };
+
 // Track all active instances for emergency cleanup
-const activeInstances = new Set<CycleTLSClient>();
+const activeInstances = new Set<CycleTLS>();
 
 export interface CycleTLSOptions {
   port?: number;
   timeout?: number;
   debug?: boolean;
-  [key: string]: any;
+  executablePath?: string;
+  autoSpawn?: boolean;
+  initialWindow?: number;
+  creditThreshold?: number;
 }
 
 /**
@@ -48,28 +53,28 @@ export async function streamToJson<T = unknown>(stream: Readable): Promise<T> {
  *
  * @example
  * test("Should handle timeout", async () => {
- *   await withCycleTLS(9117, async (cycleTLS) => {
- *     const response = await cycleTLS('https://example.com', {});
+ *   await withCycleTLS(9117, async (client) => {
+ *     const response = await client.get('https://example.com');
  *     expect(response.status).toBe(200);
  *   });
  * });
  */
 export async function withCycleTLS<T>(
   portOrOptions: number | CycleTLSOptions,
-  testFn: (cycleTLS: CycleTLSClient) => Promise<T>
+  testFn: (client: CycleTLS) => Promise<T>
 ): Promise<T> {
   const options = typeof portOrOptions === 'number'
     ? { port: portOrOptions }
     : portOrOptions;
 
-  const cycleTLS = await initCycleTLS(options);
-  activeInstances.add(cycleTLS);
+  const client = new CycleTLS(options);
+  activeInstances.add(client);
 
   try {
-    return await testFn(cycleTLS);
+    return await testFn(client);
   } finally {
-    activeInstances.delete(cycleTLS);
-    await cycleTLS.exit();
+    activeInstances.delete(client);
+    await client.close();
   }
 }
 
@@ -82,23 +87,23 @@ export async function withCycleTLS<T>(
  *
  * @example
  * test("Multiple instances", async () => {
- *   const cycleTLS1 = await createSafeCycleTLS({ port: 9001 });
- *   const cycleTLS2 = await createSafeCycleTLS({ port: 9002 });
+ *   const client1 = createSafeCycleTLS({ port: 9001 });
+ *   const client2 = createSafeCycleTLS({ port: 9002 });
  *
  *   try {
  *     // Test logic here
  *   } finally {
- *     await cleanupCycleTLS(cycleTLS1);
- *     await cleanupCycleTLS(cycleTLS2);
+ *     await cleanupCycleTLS(client1);
+ *     await cleanupCycleTLS(client2);
  *   }
  * });
  */
-export async function createSafeCycleTLS(
+export function createSafeCycleTLS(
   options?: CycleTLSOptions
-): Promise<CycleTLSClient> {
-  const cycleTLS = await initCycleTLS(options);
-  activeInstances.add(cycleTLS);
-  return cycleTLS;
+): CycleTLS {
+  const client = new CycleTLS(options);
+  activeInstances.add(client);
+  return client;
 }
 
 /**
@@ -106,10 +111,10 @@ export async function createSafeCycleTLS(
  *
  * @param instance - CycleTLS instance to cleanup
  */
-export async function cleanupCycleTLS(instance: CycleTLSClient): Promise<void> {
+export async function cleanupCycleTLS(instance: CycleTLS): Promise<void> {
   if (activeInstances.has(instance)) {
     activeInstances.delete(instance);
-    await instance.exit();
+    await instance.close();
   }
 }
 
@@ -122,11 +127,11 @@ export async function cleanupCycleTLS(instance: CycleTLSClient): Promise<void> {
  *
  * @example
  * describe("Test Suite", () => {
- *   let cycleTLS: CycleTLSClient;
+ *   let client: CycleTLS;
  *   let cleanup: () => Promise<void>;
  *
- *   beforeAll(async () => {
- *     ({ instance: cycleTLS, cleanup } = await createSuiteInstance({ port: 9001 }));
+ *   beforeAll(() => {
+ *     ({ instance: client, cleanup } = createSuiteInstance({ port: 9001 }));
  *   });
  *
  *   afterAll(async () => {
@@ -134,14 +139,14 @@ export async function cleanupCycleTLS(instance: CycleTLSClient): Promise<void> {
  *   });
  *
  *   test("test 1", async () => {
- *     // Use cycleTLS here
+ *     // Use client here
  *   });
  * });
  */
-export async function createSuiteInstance(
+export function createSuiteInstance(
   options?: CycleTLSOptions
-): Promise<{ instance: CycleTLSClient; cleanup: () => Promise<void> }> {
-  const instance = await createSafeCycleTLS(options);
+): { instance: CycleTLS; cleanup: () => Promise<void> } {
+  const instance = createSafeCycleTLS(options);
 
   const cleanup = async () => {
     await cleanupCycleTLS(instance);
@@ -163,11 +168,11 @@ export function getActiveInstanceCount(): number {
  */
 async function cleanupAll(): Promise<void> {
   if (activeInstances.size > 0) {
-    console.warn(`⚠️  Cleaning up ${activeInstances.size} orphaned CycleTLS instances`);
+    console.warn(`Warning: Cleaning up ${activeInstances.size} orphaned CycleTLS instances`);
     const instances = [...activeInstances];
     await Promise.all(instances.map(async (instance) => {
       try {
-        await instance.exit();
+        await instance.close();
       } catch (error) {
         console.error('Error cleaning up CycleTLS instance:', error);
       }

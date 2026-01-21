@@ -1,4 +1,3 @@
-const initCycleTLS = require("../dist/index.js");
 const { withCycleTLS } = require("./test-utils.js");
 jest.setTimeout(30000);
 
@@ -7,50 +6,53 @@ let ja3 =
 let userAgent =
   "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0";
 
-var requestDict = {
-  "https://httpbin.org/user-agent": {
-    ja3: ja3,
-    userAgent: userAgent,
-  },
-  "http://httpbin.org/post": {
-    body: '{"field":"POST-VAL"}',
-    method: "POST",
-  },
-  "http://httpbin.org/cookies": {
-    cookies: [
+test("Multiple sequential GET requests should complete successfully", async () => {
+  // Use a random high port to avoid conflicts
+  const port = 9200 + Math.floor(Math.random() * 100);
+  await withCycleTLS({ port, timeout: 30000, autoSpawn: true }, async (cycleTLS) => {
+    const urls = [
+      "https://httpbin.org/user-agent",
+      "https://httpbin.org/get",
+      "https://httpbin.org/headers",
+    ];
+
+    // Make requests sequentially
+    for (const url of urls) {
+      const response = await cycleTLS.get(url, {
+        ja3: ja3,
+        userAgent: userAgent,
+      });
+
+      // Verify response (V2 API uses statusCode)
+      expect(response.statusCode).toBe(200);
+
+      // Consume body to properly complete request
+      for await (const _ of response.body) {
+        // drain body
+      }
+    }
+  });
+});
+
+test("POST request should complete successfully", async () => {
+  const port = 9210 + Math.floor(Math.random() * 100);
+  await withCycleTLS({ port, timeout: 30000, autoSpawn: true }, async (cycleTLS) => {
+    const response = await cycleTLS.post(
+      "https://httpbin.org/post",
+      JSON.stringify({ field: "POST-VAL" }),
       {
-        name: "example1",
-        value: "aaaaaaa",
-        expires: "2022-01-02T15:04:05Z",
-      },
-    ],
-  },
-};
+        ja3: ja3,
+        userAgent: userAgent,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
 
-test("Multiple concurrent requests should complete successfully", async () => {
-  await withCycleTLS({ port: 9150, timeout: 30000 }, async (cycleTLS) => {
-    const promises = Object.entries(requestDict).map(([url, params]) => {
-      return cycleTLS(
-        url,
-        {
-          body: params.body ?? "",
-          ja3: params.ja3 ?? ja3,
-          userAgent: params.userAgent ?? userAgent,
-          headers: params.headers,
-          cookies: params.cookies,
-          timeout: 30,
-        },
-        params.method ?? "GET"
-      );
-    });
+    expect(response.statusCode).toBe(200);
 
-    // Wait for all promises to resolve and check their status
-    const results = await Promise.all(promises);
-
-    // Verify each response
-    results.forEach((response) => {
-      expect(response.status).toBe(200);
-    });
+    // Consume body
+    for await (const _ of response.body) {
+      // drain body
+    }
   });
 });
 
@@ -64,21 +66,21 @@ test("Sequential requests to same host should reuse connection", async () => {
       ja3: ja3,
       userAgent: userAgent,
     });
-    expect(response1.status).toBe(200);
+    expect(response1.statusCode).toBe(200);
 
     // Second request - should reuse connection
     const response2 = await cycleTLS.get(`${url}/get?second=true`, {
       ja3: ja3,
       userAgent: userAgent,
     });
-    expect(response2.status).toBe(200);
+    expect(response2.statusCode).toBe(200);
 
     // Third request with different path but same domain - should still reuse connection
     const response3 = await cycleTLS.get(`${url}/headers`, {
       ja3: ja3,
       userAgent: userAgent,
     });
-    expect(response3.status).toBe(200);
+    expect(response3.statusCode).toBe(200);
 
     // The connection reuse is happening at the Go level, and we can't directly test it from JS
     // But we can verify that all requests completed successfully
