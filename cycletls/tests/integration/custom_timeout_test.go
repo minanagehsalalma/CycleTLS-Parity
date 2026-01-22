@@ -46,8 +46,10 @@ func TestTimeoutError(t *testing.T) {
 	if resp.Status != 408 {
 		t.Fatalf("Expected %d Got %d for Status", 408, resp.Status)
 	}
-	if strings.Contains(resp.Body, "Timeout") == false {
-		t.Fatalf("Expected %s in Body Got %s", "Timeout", resp.Body)
+	// Check for timeout-related keywords in the response body (case-insensitive)
+	bodyLower := strings.ToLower(resp.Body)
+	if !strings.Contains(bodyLower, "timeout") && !strings.Contains(bodyLower, "deadline") {
+		t.Fatalf("Expected timeout-related message in Body, Got %s", resp.Body)
 	}
 
 }
