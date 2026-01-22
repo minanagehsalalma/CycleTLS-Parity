@@ -12,8 +12,8 @@ test("Test Multiple Imports, should return 200", async () => {
   };
 
   // Test multiple imports by using the same port - second should connect as client
-  const client1 = createSafeCycleTLS({ port: 9161, timeout: 30000 });
-  const client2 = createSafeCycleTLS({ port: 9161, timeout: 30000 });
+  const client1 = await createSafeCycleTLS({ port: 9161, timeout: 30000 });
+  const client2 = await createSafeCycleTLS({ port: 9161, timeout: 30000 });
 
   try {
     // Both instances should work

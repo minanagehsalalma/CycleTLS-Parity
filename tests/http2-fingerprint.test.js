@@ -47,7 +47,9 @@ describe("HTTP/2 Fingerprinting Tests", () => {
 
   });
 
-  test("Firefox HTTP/2 fingerprint with scrapfly.io", async () => {
+  // Skip scrapfly.io tests - service is unreliable and causes CI flakiness
+  // The peet.ws tests above provide equivalent coverage
+  test.skip("Firefox HTTP/2 fingerprint with scrapfly.io", async () => {
     const firefoxHTTP2 = "1:65536;2:0;4:131072;5:16384|12517377|0|m,p,a,s";
 
     const response = await client.get('https://tools.scrapfly.io/api/fp/anything', {
@@ -65,7 +67,9 @@ describe("HTTP/2 Fingerprinting Tests", () => {
 
   }, 60000);
 
-  test("Chrome HTTP/2 fingerprint with scrapfly.io", async () => {
+  // Skip scrapfly.io tests - service is unreliable and causes CI flakiness
+  // The peet.ws tests above provide equivalent coverage
+  test.skip("Chrome HTTP/2 fingerprint with scrapfly.io", async () => {
     const chromeHTTP2 = "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p";
 
     const response = await client.get('https://tools.scrapfly.io/api/fp/anything', {

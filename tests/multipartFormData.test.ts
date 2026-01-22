@@ -7,8 +7,8 @@ describe("CycleTLS Multipart Form Data Test", () => {
   let client: CycleTLS;
   let cleanup: () => Promise<void>;
 
-  beforeAll(() => {
-    ({ instance: client, cleanup } = createSuiteInstance({ port: 9160, timeout: 30000 }));
+  beforeAll(async () => {
+    ({ instance: client, cleanup } = await createSuiteInstance({ port: 9160, timeout: 30000 }));
   });
 
   afterAll(async () => {
