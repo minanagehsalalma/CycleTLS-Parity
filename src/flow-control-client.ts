@@ -1500,8 +1500,21 @@ export class CycleTLS extends EventEmitter {
    * Stop the server if we spawned it.
    */
   async close(): Promise<void> {
-    if (this.serverProcess) {
-      this.serverProcess.kill();
+    if (this.serverProcess && this.serverProcess.pid) {
+      if (process.platform === "win32") {
+        // Windows: just kill the process
+        this.serverProcess.kill("SIGKILL");
+      } else {
+        // Unix: kill the process group (negative PID) since it was spawned with detached: true
+        try {
+          process.kill(-this.serverProcess.pid, "SIGKILL");
+        } catch (error) {
+          // ESRCH means process already exited - that's fine
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+            console.error("Error killing process group:", error);
+          }
+        }
+      }
       this.serverProcess = null;
     }
   }
