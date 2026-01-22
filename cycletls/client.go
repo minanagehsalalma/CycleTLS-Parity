@@ -3,11 +3,11 @@ package cycletls
 import (
 	"context"
 	"fmt"
-	fhttp "github.com/Danny-Dasilva/fhttp"
 	"hash/fnv"
 	"sync"
 	"time"
 
+	fhttp "github.com/Danny-Dasilva/fhttp"
 	"github.com/gorilla/websocket"
 	uquic "github.com/refraction-networking/uquic"
 	utls "github.com/refraction-networking/utls"
@@ -84,12 +84,8 @@ var disabledRedirect = func(req *fhttp.Request, via []*fhttp.Request) error {
 }
 
 func clientBuilder(browser Browser, dialer proxy.ContextDialer, timeout int, disableRedirect bool) fhttp.Client {
-	if timeout == 0 {
-		timeout = 15 // default timeout
-	}
 	client := fhttp.Client{
 		Transport: newRoundTripper(browser, dialer),
-		Timeout:   time.Duration(timeout) * time.Second,
 	}
 	if disableRedirect {
 		client.CheckRedirect = disabledRedirect
@@ -157,7 +153,7 @@ func generateClientKey(browser Browser, timeout int, disableRedirect bool, proxy
 	}
 
 	// Create a hash of the configuration that affects connection behavior
-	configStr := fmt.Sprintf("ja3:%s|ja4r:%s|http2:%s|quic:%s|ua:%s|sni:%s|proxy:%s|timeout:%d|redirect:%t|skipverify:%t|forcehttp1:%t|forcehttp3:%t%s",
+	configStr := fmt.Sprintf("ja3:%s|ja4r:%s|http2:%s|quic:%s|ua:%s|sni:%s|proxy:%s|redirect:%t|skipverify:%t|forcehttp1:%t|forcehttp3:%t%s",
 		browser.JA3,
 		browser.JA4r,
 		browser.HTTP2Fingerprint,
@@ -165,7 +161,6 @@ func generateClientKey(browser Browser, timeout int, disableRedirect bool, proxy
 		browser.UserAgent,
 		browser.ServerName,
 		proxyURL,
-		timeout,
 		disableRedirect,
 		browser.InsecureSkipVerify,
 		browser.ForceHTTP1,
@@ -244,7 +239,6 @@ func createNewClient(browser Browser, timeout int, disableRedirect bool, userAge
 		dialer, err = newConnectDialer(proxyURL[0], userAgent, browser.InsecureSkipVerify)
 		if err != nil {
 			return fhttp.Client{
-				Timeout:       time.Duration(timeout) * time.Second,
 				CheckRedirect: disabledRedirect,
 			}, err
 		}

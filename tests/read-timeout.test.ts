@@ -1,5 +1,6 @@
 import CycleTLS, { CycleTLSError } from "../dist/index.js";
 import http from "http";
+import net from "net";
 import { withCycleTLS } from "./test-utils.js";
 
 jest.setTimeout(30000);
@@ -17,16 +18,20 @@ jest.setTimeout(30000);
 describe("Read timeout handling", () => {
   let server: http.Server;
   let serverPort: number;
+  const sockets = new Set<net.Socket>();
 
   beforeAll((done) => {
     // Create a test server that delays the response body
     server = http.createServer((req, res) => {
       if (req.url === "/slow-headers") {
         // Don't send headers for a while - this WILL trigger timeout
-        setTimeout(() => {
+        const timer = setTimeout(() => {
           res.writeHead(200, { "Content-Type": "text/plain" });
           res.end("Delayed headers response");
         }, 5000);
+        const clearTimer = () => clearTimeout(timer);
+        req.on("close", clearTimer);
+        res.on("close", clearTimer);
       } else if (req.url === "/slow-body") {
         // Send headers immediately
         res.writeHead(200, { "Content-Type": "text/plain" });
@@ -45,13 +50,23 @@ describe("Read timeout handling", () => {
       }
     });
 
+    server.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.unref();
+      socket.on("close", () => sockets.delete(socket));
+    });
+
     server.listen(0, () => {
       serverPort = (server.address() as any).port;
+      server.unref();
       done();
     });
   });
 
   afterAll((done) => {
+    for (const socket of sockets) {
+      socket.destroy();
+    }
     server.close(done);
   });
 

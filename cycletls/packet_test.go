@@ -244,9 +244,14 @@ func TestReaderReadString(t *testing.T) {
 }
 
 func TestReaderReadStringTooLarge(t *testing.T) {
+	maxUint16 := ^uint16(0)
+	if MaxStringLen >= int(maxUint16) {
+		t.Skip("MaxStringLen equals uint16 max; overflow case unreachable with 2-byte length")
+	}
+
 	// Create data with length > MaxStringLen
 	data := make([]byte, 2)
-	binary.BigEndian.PutUint16(data, MaxStringLen+1)
+	binary.BigEndian.PutUint16(data, maxUint16)
 
 	r := NewReader(data)
 	_, err := r.ReadString()

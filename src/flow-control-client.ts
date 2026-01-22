@@ -194,6 +194,25 @@ export class CycleTLSError extends Error {
   }
 }
 
+/**
+ * Creates a lazy buffer getter that caches the body stream contents.
+ * Used by convenience methods (json, text, buffer, etc.) to avoid re-reading the stream.
+ */
+function createBufferGetter(bodyStream: Readable): () => Promise<Buffer> {
+  let cachedBuffer: Buffer | null = null;
+  return async (): Promise<Buffer> => {
+    if (cachedBuffer !== null) {
+      return cachedBuffer;
+    }
+    const chunks: Buffer[] = [];
+    for await (const chunk of bodyStream) {
+      chunks.push(chunk as Buffer);
+    }
+    cachedBuffer = Buffer.concat(chunks);
+    return cachedBuffer;
+  };
+}
+
 // WebSocket ready states matching the ws library
 const WS_CONNECTING = 0;
 const WS_OPEN = 1;
@@ -674,7 +693,7 @@ export class CycleTLS extends EventEmitter {
           ja4r: options.ja4r,
           userAgent: options.userAgent,
           proxy: options.proxy,
-          timeout: options.timeout,
+          timeout: effectiveTimeout,
           disableRedirect: options.disableRedirect,
           insecureSkipVerify: options.insecureSkipVerify,
           forceHTTP1: options.forceHTTP1,
@@ -719,20 +738,8 @@ export class CycleTLS extends EventEmitter {
               // Start the read timeout if configured (for body streaming)
               resetReadTimeout();
 
-              // Create a buffered copy for convenience methods
-              // The buffer is lazily populated when first needed
-              let cachedBuffer: Buffer | null = null;
-              const getBuffer = async (): Promise<Buffer> => {
-                if (cachedBuffer !== null) {
-                  return cachedBuffer;
-                }
-                const chunks: Buffer[] = [];
-                for await (const chunk of bodyStream) {
-                  chunks.push(chunk as Buffer);
-                }
-                cachedBuffer = Buffer.concat(chunks);
-                return cachedBuffer;
-              };
+              // Create a lazy buffer getter for convenience methods
+              const getBuffer = createBufferGetter(bodyStream);
 
               resolve({
                 requestId,
@@ -1005,7 +1012,7 @@ export class CycleTLS extends EventEmitter {
           ja4r: options.ja4r,
           userAgent: options.userAgent,
           proxy: options.proxy,
-          timeout: options.timeout,
+          timeout: effectiveTimeout,
           disableRedirect: options.disableRedirect,
           insecureSkipVerify: options.insecureSkipVerify,
           forceHTTP1: options.forceHTTP1,
@@ -1295,7 +1302,7 @@ export class CycleTLS extends EventEmitter {
           ja4r: options.ja4r,
           userAgent: options.userAgent,
           proxy: options.proxy,
-          timeout: options.timeout,
+          timeout: effectiveTimeout,
           disableRedirect: options.disableRedirect,
           insecureSkipVerify: options.insecureSkipVerify,
           forceHTTP1: options.forceHTTP1,
@@ -1325,19 +1332,8 @@ export class CycleTLS extends EventEmitter {
               resolved = true;
               clearTimeout(timeoutId);
 
-              // Create buffered response methods
-              let cachedBuffer: Buffer | null = null;
-              const getBuffer = async (): Promise<Buffer> => {
-                if (cachedBuffer !== null) {
-                  return cachedBuffer;
-                }
-                const chunks: Buffer[] = [];
-                for await (const chunk of bodyStream) {
-                  chunks.push(chunk as Buffer);
-                }
-                cachedBuffer = Buffer.concat(chunks);
-                return cachedBuffer;
-              };
+              // Create a lazy buffer getter for convenience methods
+              const getBuffer = createBufferGetter(bodyStream);
 
               const sseResponse: SSEResponse = {
                 requestId,

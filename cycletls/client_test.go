@@ -73,11 +73,6 @@ func TestGenerateClientKey_DifferentOptionsDifferentKeys(t *testing.T) {
 		t.Error("Different JA3 should produce different key")
 	}
 
-	keyDiffTimeout := generateClientKey(baseBrowser, 60, baseDisableRedirect, baseProxyURL)
-	if baseKey == keyDiffTimeout {
-		t.Error("Different timeout should produce different key")
-	}
-
 	keyDiffRedirect := generateClientKey(baseBrowser, baseTimeout, true, baseProxyURL)
 	if baseKey == keyDiffRedirect {
 		t.Error("Different disableRedirect should produce different key")

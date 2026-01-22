@@ -49,7 +49,7 @@ func (scw *safeChannelWriter) write(data []byte) bool {
 	// Use defer/recover to handle panics from closed channel
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("Recovered from panic writing to channel: %v", r)
+			debugLogger.Printf("Recovered from panic writing to channel: %v", r)
 		}
 	}()
 
@@ -342,7 +342,13 @@ func processRequest(request cycleTLSRequest) (result fullRequest) {
 
 	state.RegisterRequest(request.RequestID, cancel)
 
-	return fullRequest{req: req, client: client, options: request}
+	return fullRequest{
+		req:     req,
+		client:  client,
+		options: request,
+		ctx:     ctx,
+		cancel:  cancel,
+	}
 }
 
 // dispatchHTTP3Request handles HTTP/3 specific request processing
@@ -403,7 +409,13 @@ func dispatchHTTP3Request(request cycleTLSRequest) (result fullRequest) {
 
 	state.RegisterRequest(request.RequestID, cancel)
 
-	return fullRequest{req: req, client: client, options: request}
+	return fullRequest{
+		req:     req,
+		client:  client,
+		options: request,
+		ctx:     ctx,
+		cancel:  cancel,
+	}
 }
 
 // dispatchSSERequest handles SSE specific request processing
@@ -446,6 +458,8 @@ func dispatchSSERequest(request cycleTLSRequest) (result fullRequest) {
 		client:    client,
 		options:   request,
 		sseClient: sseClient,
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 }
 
@@ -495,7 +509,7 @@ func dispatcherAsync(res fullRequest, chanWrite *safeChannelWriter) {
 	// Add panic recovery to prevent crashes from channel issues
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("Recovered from panic in dispatcherAsync for request %s: %v", res.options.RequestID, r)
+			debugLogger.Printf("Recovered from panic in dispatcherAsync for request %s: %v", res.options.RequestID, r)
 		}
 	}()
 
@@ -503,8 +517,8 @@ func dispatcherAsync(res fullRequest, chanWrite *safeChannelWriter) {
 	if res.err != nil {
 		b := getBuffer()
 		defer putBuffer(b)
-		var requestIDLength = len(res.options.RequestID)
-		var statusCode = 400
+		requestIDLength := len(res.options.RequestID)
+		statusCode := 400
 
 		b.WriteByte(byte(requestIDLength >> 8))
 		b.WriteByte(byte(requestIDLength))
@@ -523,7 +537,7 @@ func dispatcherAsync(res fullRequest, chanWrite *safeChannelWriter) {
 		b.WriteString(message)
 
 		if !chanWrite.write(b.Bytes()) {
-			log.Printf("Failed to write error response for request %s: channel closed", res.options.RequestID)
+			debugLogger.Printf("Failed to write error response for request %s: channel closed", res.options.RequestID)
 		}
 		return
 	}
@@ -538,6 +552,10 @@ func dispatcherAsync(res fullRequest, chanWrite *safeChannelWriter) {
 	if res.wsClient != nil {
 		dispatchWebSocketAsync(res, chanWrite)
 		return
+	}
+
+	if res.cancel != nil {
+		defer res.cancel()
 	}
 
 	defer func() {
@@ -566,14 +584,15 @@ func dispatcherAsync(res fullRequest, chanWrite *safeChannelWriter) {
 
 	finalUrl := res.options.Options.URL
 
-	resp, err := res.client.Do(res.req)
+	timeout := timeoutSeconds(res.options.Options.Timeout)
+	resp, err := doRequestWithHeaderTimeout(res.ctx, res.cancel, res.client, res.req, timeout)
 
 	if err != nil {
 		parsedError := parseError(err)
 
 		{
 			b := getBuffer()
-			var requestIDLength = len(res.options.RequestID)
+			requestIDLength := len(res.options.RequestID)
 
 			b.WriteByte(byte(requestIDLength >> 8))
 			b.WriteByte(byte(requestIDLength))
@@ -584,15 +603,15 @@ func dispatcherAsync(res fullRequest, chanWrite *safeChannelWriter) {
 			b.WriteByte(byte(parsedError.StatusCode >> 8))
 			b.WriteByte(byte(parsedError.StatusCode))
 
-			var message = parsedError.ErrorMsg + "-> \n" + string(err.Error())
-			var messageLength = len(message)
+			message := parsedError.ErrorMsg + "-> \n" + err.Error()
+			messageLength := len(message)
 
 			b.WriteByte(byte(messageLength >> 8))
 			b.WriteByte(byte(messageLength))
 			b.WriteString(message)
 
 			if !chanWrite.write(b.Bytes()) {
-				log.Printf("Failed to write error response for request %s: channel closed", res.options.RequestID)
+				debugLogger.Printf("Failed to write error response for request %s: channel closed", res.options.RequestID)
 			}
 			putBuffer(b)
 		}
@@ -609,9 +628,9 @@ func dispatcherAsync(res fullRequest, chanWrite *safeChannelWriter) {
 
 	{
 		b := getBuffer()
-		var headerLength = len(resp.Header)
-		var requestIDLength = len(res.options.RequestID)
-		var finalUrlLength = len(finalUrl)
+		headerLength := len(resp.Header)
+		requestIDLength := len(res.options.RequestID)
+		finalUrlLength := len(finalUrl)
 
 		b.WriteByte(byte(requestIDLength >> 8))
 		b.WriteByte(byte(requestIDLength))
@@ -632,8 +651,8 @@ func dispatcherAsync(res fullRequest, chanWrite *safeChannelWriter) {
 		b.WriteByte(byte(headerLength))
 
 		for name, values := range resp.Header {
-			var nameLength = len(name)
-			var valuesLength = len(values)
+			nameLength := len(name)
+			valuesLength := len(values)
 
 			b.WriteByte(byte(nameLength >> 8))
 			b.WriteByte(byte(nameLength))
@@ -642,7 +661,7 @@ func dispatcherAsync(res fullRequest, chanWrite *safeChannelWriter) {
 			b.WriteByte(byte(valuesLength))
 
 			for _, value := range values {
-				var valueLength = len(value)
+				valueLength := len(value)
 
 				b.WriteByte(byte(valueLength >> 8))
 				b.WriteByte(byte(valueLength))
@@ -651,7 +670,7 @@ func dispatcherAsync(res fullRequest, chanWrite *safeChannelWriter) {
 		}
 
 		if !chanWrite.write(b.Bytes()) {
-			log.Printf("Failed to write to channel: channel closed")
+			debugLogger.Printf("Failed to write to channel: channel closed")
 			putBuffer(b)
 			return
 		}
@@ -703,7 +722,7 @@ func dispatcherAsync(res fullRequest, chanWrite *safeChannelWriter) {
 					b.WriteString(message)
 
 					if !chanWrite.write(b.Bytes()) {
-						log.Printf("Failed to write to channel: channel closed")
+						debugLogger.Printf("Failed to write to channel: channel closed")
 						putBuffer(b)
 						return
 					}
@@ -731,7 +750,7 @@ func dispatcherAsync(res fullRequest, chanWrite *safeChannelWriter) {
 						b.Write(chunkBuffer[:n])
 
 						if !chanWrite.write(b.Bytes()) {
-							log.Printf("Failed to write to channel: channel closed")
+							debugLogger.Printf("Failed to write to channel: channel closed")
 							putBuffer(b)
 							return
 						}
@@ -763,7 +782,7 @@ func dispatcherAsync(res fullRequest, chanWrite *safeChannelWriter) {
 				b.Write(chunkBuffer[:n])
 
 				if !chanWrite.write(b.Bytes()) {
-					log.Printf("Failed to write to channel: channel closed")
+					debugLogger.Printf("Failed to write to channel: channel closed")
 					putBuffer(b)
 					return
 				}
@@ -784,7 +803,7 @@ func dispatcherAsync(res fullRequest, chanWrite *safeChannelWriter) {
 		b.WriteString("end")
 
 		if !chanWrite.write(b.Bytes()) {
-			log.Printf("Failed to write to channel: channel closed")
+			debugLogger.Printf("Failed to write to channel: channel closed")
 			putBuffer(b)
 			return
 		}
@@ -796,17 +815,18 @@ func dispatcherAsync(res fullRequest, chanWrite *safeChannelWriter) {
 func dispatchSSEAsync(res fullRequest, chanWrite *safeChannelWriter) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("Recovered from panic in dispatchSSEAsync for request %s: %v", res.options.RequestID, r)
+			debugLogger.Printf("Recovered from panic in dispatchSSEAsync for request %s: %v", res.options.RequestID, r)
 		}
 		state.UnregisterRequest(res.options.RequestID)
 	}()
 
 	// Connect to SSE endpoint
-	sseResp, err := res.sseClient.Connect(res.req.Context(), res.options.Options.URL)
+	timeout := timeoutSeconds(res.options.Options.Timeout)
+	sseResp, err := res.sseClient.ConnectWithTimeout(res.req.Context(), res.options.Options.URL, timeout)
 	if err != nil {
 		// Send error response
 		b := getBuffer()
-		var requestIDLength = len(res.options.RequestID)
+		requestIDLength := len(res.options.RequestID)
 
 		b.WriteByte(byte(requestIDLength >> 8))
 		b.WriteByte(byte(requestIDLength))
@@ -814,18 +834,18 @@ func dispatchSSEAsync(res fullRequest, chanWrite *safeChannelWriter) {
 		b.WriteByte(0)
 		b.WriteByte(5)
 		b.WriteString("error")
-		b.WriteByte(byte(0 >> 8)) // Status code 0
-		b.WriteByte(byte(0))
+		b.WriteByte(0) // Status code 0
+		b.WriteByte(0)
 
-		var message = "SSE connection failed: " + err.Error()
-		var messageLength = len(message)
+		message := "SSE connection failed: " + err.Error()
+		messageLength := len(message)
 
 		b.WriteByte(byte(messageLength >> 8))
 		b.WriteByte(byte(messageLength))
 		b.WriteString(message)
 
 		if !chanWrite.write(b.Bytes()) {
-			log.Printf("Failed to write to channel: channel closed")
+			debugLogger.Printf("Failed to write to channel: channel closed")
 			putBuffer(b)
 			return
 		}
@@ -837,9 +857,9 @@ func dispatchSSEAsync(res fullRequest, chanWrite *safeChannelWriter) {
 	// Send initial response with headers
 	{
 		b := getBuffer()
-		var headerLength = len(sseResp.Response.Header)
-		var requestIDLength = len(res.options.RequestID)
-		var finalUrlLength = len(res.options.Options.URL)
+		headerLength := len(sseResp.Response.Header)
+		requestIDLength := len(res.options.RequestID)
+		finalUrlLength := len(res.options.Options.URL)
 
 		b.WriteByte(byte(requestIDLength >> 8))
 		b.WriteByte(byte(requestIDLength))
@@ -860,8 +880,8 @@ func dispatchSSEAsync(res fullRequest, chanWrite *safeChannelWriter) {
 		b.WriteByte(byte(headerLength))
 
 		for name, values := range sseResp.Response.Header {
-			var nameLength = len(name)
-			var valuesLength = len(values)
+			nameLength := len(name)
+			valuesLength := len(values)
 
 			b.WriteByte(byte(nameLength >> 8))
 			b.WriteByte(byte(nameLength))
@@ -870,7 +890,7 @@ func dispatchSSEAsync(res fullRequest, chanWrite *safeChannelWriter) {
 			b.WriteByte(byte(valuesLength))
 
 			for _, value := range values {
-				var valueLength = len(value)
+				valueLength := len(value)
 
 				b.WriteByte(byte(valueLength >> 8))
 				b.WriteByte(byte(valueLength))
@@ -879,7 +899,7 @@ func dispatchSSEAsync(res fullRequest, chanWrite *safeChannelWriter) {
 		}
 
 		if !chanWrite.write(b.Bytes()) {
-			log.Printf("Failed to write to channel: channel closed")
+			debugLogger.Printf("Failed to write to channel: channel closed")
 			putBuffer(b)
 			return
 		}
@@ -940,7 +960,7 @@ func dispatchSSEAsync(res fullRequest, chanWrite *safeChannelWriter) {
 			b.Write(eventBytes)
 
 			if !chanWrite.write(b.Bytes()) {
-				log.Printf("Failed to write to channel: channel closed")
+				debugLogger.Printf("Failed to write to channel: channel closed")
 				putBuffer(b)
 				return
 			}
@@ -961,7 +981,7 @@ func dispatchSSEAsync(res fullRequest, chanWrite *safeChannelWriter) {
 		b.WriteString("end")
 
 		if !chanWrite.write(b.Bytes()) {
-			log.Printf("Failed to write to channel: channel closed")
+			debugLogger.Printf("Failed to write to channel: channel closed")
 			putBuffer(b)
 			return
 		}
@@ -973,7 +993,7 @@ func dispatchSSEAsync(res fullRequest, chanWrite *safeChannelWriter) {
 func dispatchWebSocketAsync(res fullRequest, chanWrite *safeChannelWriter) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("Recovered from panic in dispatchWebSocketAsync for request %s: %v", res.options.RequestID, r)
+			debugLogger.Printf("Recovered from panic in dispatchWebSocketAsync for request %s: %v", res.options.RequestID, r)
 		}
 		state.UnregisterRequest(res.options.RequestID)
 
@@ -1156,10 +1176,10 @@ func dispatchWebSocketAsync(res fullRequest, chanWrite *safeChannelWriter) {
 }
 
 // Helper functions for sending WebSocket messages
-func sendWebSocketError(chanWrite *safeChannelWriter, requestID, url string, resp *nhttp.Response, err error) {
+func sendWebSocketError(chanWrite *safeChannelWriter, requestID, _ string, resp *nhttp.Response, err error) {
 	b := getBuffer()
 	defer putBuffer(b)
-	var requestIDLength = len(requestID)
+	requestIDLength := len(requestID)
 
 	b.WriteByte(byte(requestIDLength >> 8))
 	b.WriteByte(byte(requestIDLength))
@@ -1176,8 +1196,8 @@ func sendWebSocketError(chanWrite *safeChannelWriter, requestID, url string, res
 	b.WriteByte(byte(statusCode >> 8))
 	b.WriteByte(byte(statusCode))
 
-	var message = err.Error()
-	var messageLength = len(message)
+	message := err.Error()
+	messageLength := len(message)
 
 	b.WriteByte(byte(messageLength >> 8))
 	b.WriteByte(byte(messageLength))
@@ -1189,9 +1209,9 @@ func sendWebSocketError(chanWrite *safeChannelWriter, requestID, url string, res
 func sendWebSocketResponse(chanWrite *safeChannelWriter, requestID, url string, resp *nhttp.Response) {
 	b := getBuffer()
 	defer putBuffer(b)
-	var headerLength = len(resp.Header)
-	var requestIDLength = len(requestID)
-	var finalUrlLength = len(url)
+	headerLength := len(resp.Header)
+	requestIDLength := len(requestID)
+	finalUrlLength := len(url)
 
 	b.WriteByte(byte(requestIDLength >> 8))
 	b.WriteByte(byte(requestIDLength))
@@ -1212,8 +1232,8 @@ func sendWebSocketResponse(chanWrite *safeChannelWriter, requestID, url string, 
 	b.WriteByte(byte(headerLength))
 
 	for name, values := range resp.Header {
-		var nameLength = len(name)
-		var valuesLength = len(values)
+		nameLength := len(name)
+		valuesLength := len(values)
 
 		b.WriteByte(byte(nameLength >> 8))
 		b.WriteByte(byte(nameLength))
@@ -1222,7 +1242,7 @@ func sendWebSocketResponse(chanWrite *safeChannelWriter, requestID, url string, 
 		b.WriteByte(byte(valuesLength))
 
 		for _, value := range values {
-			var valueLength = len(value)
+			valueLength := len(value)
 
 			b.WriteByte(byte(valueLength >> 8))
 			b.WriteByte(byte(valueLength))
@@ -1339,7 +1359,7 @@ func writeSocket(chanWrite chan []byte, wsSocket *websocket.Conn) {
 		err := wsSocket.WriteMessage(websocket.BinaryMessage, buf)
 
 		if err != nil {
-			log.Print("Socket WriteMessage Failed" + err.Error())
+			debugLogger.Printf("Socket WriteMessage Failed: %s", err.Error())
 			continue
 		}
 	}
@@ -1352,7 +1372,7 @@ func readSocket(chanRead chan fullRequest, wsSocket *websocket.Conn) {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				return
 			}
-			log.Print("Socket Error", err)
+			debugLogger.Printf("Socket Error: %v", err)
 			return
 		}
 		var baseMessage map[string]interface{}
@@ -1378,7 +1398,7 @@ func readSocket(chanRead chan fullRequest, wsSocket *websocket.Conn) {
 
 				wsConnInterface, exists := state.GetWebSocket(requestId)
 				if !exists {
-					log.Printf("WebSocket connection not found for request ID: %s", requestId)
+					debugLogger.Printf("WebSocket connection not found for request ID: %s", requestId)
 					continue
 				}
 				wsConn := wsConnInterface.(*WebSocketConnection)
@@ -1422,7 +1442,7 @@ func readSocket(chanRead chan fullRequest, wsSocket *websocket.Conn) {
 				case wsConn.commandChan <- cmd:
 					// Command sent successfully
 				default:
-					log.Printf("WebSocket command channel full for request ID: %s", requestId)
+					debugLogger.Printf("WebSocket command channel full for request ID: %s", requestId)
 				}
 
 				continue
@@ -1569,6 +1589,16 @@ func (client CycleTLS) Close() {
 
 // Do creates a single HTTP request for integration tests
 func (client CycleTLS) Do(URL string, options Options, Method string) (Response, error) {
+	totalTimeout := timeoutSeconds(options.Timeout)
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if totalTimeout > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), totalTimeout)
+	} else {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
+	defer cancel()
+
 	// Create browser from options
 	browser := Browser{
 		JA3:                options.Ja3,
@@ -1606,7 +1636,7 @@ func (client CycleTLS) Do(URL string, options Options, Method string) (Response,
 	} else {
 		bodyReader = strings.NewReader(options.Body)
 	}
-	req, err := http.NewRequest(Method, URL, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, Method, URL, bodyReader)
 	if err != nil {
 		return Response{}, err
 	}
@@ -1626,7 +1656,8 @@ func (client CycleTLS) Do(URL string, options Options, Method string) (Response,
 	}
 
 	// Make request
-	resp, err := httpClient.Do(req)
+	headerTimeout := totalTimeout
+	resp, err := doRequestWithHeaderTimeout(ctx, cancel, httpClient, req, headerTimeout)
 	if err != nil {
 		parsedError := parseError(err)
 		return Response{
@@ -1639,6 +1670,13 @@ func (client CycleTLS) Do(URL string, options Options, Method string) (Response,
 	// Read body
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
+		parsedError := parseError(err)
+		if parsedError.StatusCode != 0 {
+			return Response{
+				Status: parsedError.StatusCode,
+				Body:   parsedError.ErrorMsg + " -> " + err.Error(),
+			}, nil
+		}
 		return Response{}, err
 	}
 

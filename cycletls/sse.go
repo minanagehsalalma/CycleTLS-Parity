@@ -111,6 +111,54 @@ func (sse *SSEClient) Connect(ctx context.Context, urlStr string) (*SSEResponse,
 	}, nil
 }
 
+// ConnectWithTimeout establishes an SSE connection with a header timeout.
+// The timeout only applies until headers arrive; it does not cancel streaming.
+func (sse *SSEClient) ConnectWithTimeout(ctx context.Context, urlStr string, timeout time.Duration) (*SSEResponse, error) {
+	// Create request with the provided context
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Add headers to the request
+	for k, vs := range sse.Headers {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+
+	// Add Last-Event-ID header if available
+	if sse.LastEventID != "" {
+		req.Header.Set("Last-Event-ID", sse.LastEventID)
+	}
+
+	// Send the request with header timeout
+	resp, err := doRequestWithHeaderTimeout(ctx, nil, *sse.HTTPClient, req, timeout)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check response status
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, errors.New("unexpected status code: " + strconv.Itoa(resp.StatusCode))
+	}
+
+	// Check content type
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(contentType, "text/event-stream") {
+		resp.Body.Close()
+		return nil, errors.New("unexpected content type: " + contentType)
+	}
+
+	// Create and return SSE response
+	return &SSEResponse{
+		Response: resp,
+		Scanner:  bufio.NewScanner(resp.Body),
+		client:   sse,
+	}, nil
+}
+
 // SSEResponse represents a response from an SSE connection
 type SSEResponse struct {
 	// Response is the HTTP response

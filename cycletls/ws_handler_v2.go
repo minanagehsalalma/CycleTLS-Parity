@@ -274,24 +274,24 @@ func handleWSRequestV2(ws *websocket.Conn) {
 			defer close(wsCommandCh)
 		}
 
-		log.Printf("[V2 Reader] Starting, isWebSocket=%v, protocol=%s", isWebSocket, req.Options.Protocol)
+		debugLogger.Printf("[V2 Reader] Starting, isWebSocket=%v, protocol=%s", isWebSocket, req.Options.Protocol)
 
 		for {
 			if isWebSocket {
 				// For WebSocket: handle all message types
 				msg, err := readClientMessageV2(conn, req.RequestID)
 				if err != nil {
-					log.Printf("[V2 Reader] Error: %v", err)
+					debugLogger.Printf("[V2 Reader] Error: %v", err)
 					return err
 				}
 
-				log.Printf("[V2 Reader] Received message: method=%s", msg.Method)
+				debugLogger.Printf("[V2 Reader] Received message: method=%s", msg.Method)
 
 				switch msg.Method {
 				case "credit":
 					limiter.Add(int64(msg.Credits))
 				case "ws_send":
-					log.Printf("[V2 Reader] Forwarding ws_send: type=%d, len=%d", msg.MessageType, len(msg.Data))
+					debugLogger.Printf("[V2 Reader] Forwarding ws_send: type=%d, len=%d", msg.MessageType, len(msg.Data))
 					// Forward send command to dispatcher
 					select {
 					case wsCommandCh <- WebSocketCommandV2{
@@ -299,12 +299,12 @@ func handleWSRequestV2(ws *websocket.Conn) {
 						MessageType: msg.MessageType,
 						Data:        msg.Data,
 					}:
-						log.Printf("[V2 Reader] ws_send forwarded successfully")
+						debugLogger.Printf("[V2 Reader] ws_send forwarded successfully")
 					case <-ctx.Done():
 						return ctx.Err()
 					}
 				case "ws_close":
-					log.Printf("[V2 Reader] Forwarding ws_close")
+					debugLogger.Printf("[V2 Reader] Forwarding ws_close")
 					// Forward close command to dispatcher
 					select {
 					case wsCommandCh <- WebSocketCommandV2{
@@ -362,12 +362,12 @@ func handleWSRequestV2(ws *websocket.Conn) {
 // processRequestV2 processes a request for v2 flow control mode.
 // It uses the parent context for cancellation.
 func processRequestV2(request cycleTLSRequest, parentCtx context.Context) fullRequest {
-	log.Printf("[V2] processRequestV2: protocol=%s, url=%s", request.Options.Protocol, request.Options.URL)
+	debugLogger.Printf("[V2] processRequestV2: protocol=%s, url=%s", request.Options.Protocol, request.Options.URL)
 
 	// Handle protocol-specific clients
 	switch request.Options.Protocol {
 	case "websocket":
-		log.Printf("[V2] Routing to dispatchWebSocketRequest")
+		debugLogger.Printf("[V2] Routing to dispatchWebSocketRequest")
 		return dispatchWebSocketRequest(request)
 	case "sse":
 		return dispatchSSERequest(request)
@@ -449,7 +449,8 @@ func dispatcherAsyncV2(res fullRequest, sender *frameSender) {
 	}
 
 	// Perform the HTTP request
-	resp, err := res.client.Do(res.req)
+	timeout := timeoutMilliseconds(res.options.Options.Timeout)
+	resp, err := doRequestWithHeaderTimeout(res.ctx, res.cancel, res.client, res.req, timeout)
 	if err != nil {
 		parsedError := parseError(err)
 		sender.send(buildErrorFrame(res.options.RequestID, parsedError.StatusCode, parsedError.ErrorMsg+"-> \n"+err.Error()))
@@ -514,7 +515,8 @@ func dispatchSSEAsyncV2(res fullRequest, sender *frameSender) {
 	limiter := res.limiter
 
 	// Perform the SSE HTTP request
-	resp, err := res.client.Do(res.req)
+	timeout := timeoutMilliseconds(res.options.Options.Timeout)
+	resp, err := doRequestWithHeaderTimeout(res.ctx, res.cancel, res.client, res.req, timeout)
 	if err != nil {
 		parsedError := parseError(err)
 		sender.send(buildErrorFrame(res.options.RequestID, parsedError.StatusCode, parsedError.ErrorMsg+"-> \n"+err.Error()))

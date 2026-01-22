@@ -37,10 +37,8 @@ func TestRedirectTo(t *testing.T) {
 	client := newClient()
 	defer client.Close()
 
-	// Use custom options for this test to ensure fresh connection (not reusing from TestRedirect)
-	// The combination of Timeout + EnableConnectionReuse=false ensures:
-	// 1. A unique client key (due to different timeout from default)
-	// 2. Fresh connection each time (no stale HTTP/2 streams from previous tests)
+	// Use custom options for this test to ensure a fresh connection.
+	// Disable connection reuse to avoid stale HTTP/2 streams from previous tests.
 	opts := cycletls.Options{
 		Ja3:                   defaultJA3,
 		UserAgent:             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",

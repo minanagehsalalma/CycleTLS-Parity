@@ -1,4 +1,4 @@
-const initCycleTLS = require("../dist/index.js");
+const CycleTLS = require("../dist/index.js");
 
 // Track all active instances for emergency cleanup
 const activeInstances = new Set();
@@ -24,14 +24,14 @@ async function withCycleTLS(portOrOptions, testFn) {
     ? { port: portOrOptions }
     : portOrOptions;
 
-  const cycleTLS = await initCycleTLS(options);
+  const cycleTLS = new CycleTLS(options);
   activeInstances.add(cycleTLS);
 
   try {
     return await testFn(cycleTLS);
   } finally {
     activeInstances.delete(cycleTLS);
-    await cycleTLS.exit();
+    await cycleTLS.close();
   }
 }
 
@@ -56,7 +56,7 @@ async function withCycleTLS(portOrOptions, testFn) {
  * });
  */
 async function createSafeCycleTLS(options) {
-  const cycleTLS = await initCycleTLS(options);
+  const cycleTLS = new CycleTLS(options);
   activeInstances.add(cycleTLS);
   return cycleTLS;
 }
@@ -69,7 +69,7 @@ async function createSafeCycleTLS(options) {
 async function cleanupCycleTLS(instance) {
   if (activeInstances.has(instance)) {
     activeInstances.delete(instance);
-    await instance.exit();
+    await instance.close();
   }
 }
 
@@ -125,7 +125,7 @@ async function cleanupAll() {
     const instances = [...activeInstances];
     await Promise.all(instances.map(async (instance) => {
       try {
-        await instance.exit();
+        await instance.close();
       } catch (error) {
         console.error('Error cleaning up CycleTLS instance:', error);
       }
@@ -157,10 +157,40 @@ if (typeof afterAll !== 'undefined') {
   });
 }
 
+/**
+ * Helper to consume a Readable stream into a Buffer
+ */
+async function streamToBuffer(stream) {
+  const chunks = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+/**
+ * Helper to consume a Readable stream into a string
+ */
+async function streamToText(stream) {
+  const buffer = await streamToBuffer(stream);
+  return buffer.toString("utf8");
+}
+
+/**
+ * Helper to consume a Readable stream and parse as JSON
+ */
+async function streamToJson(stream) {
+  const text = await streamToText(stream);
+  return JSON.parse(text);
+}
+
 module.exports = {
   withCycleTLS,
   createSafeCycleTLS,
   cleanupCycleTLS,
   createSuiteInstance,
-  getActiveInstanceCount
+  getActiveInstanceCount,
+  streamToBuffer,
+  streamToText,
+  streamToJson
 };
