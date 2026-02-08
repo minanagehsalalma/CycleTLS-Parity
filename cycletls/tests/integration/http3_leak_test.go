@@ -4,8 +4,6 @@
 package cycletls_test
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"runtime"
 	"testing"
 	"time"
@@ -13,35 +11,41 @@ import (
 	cycletls "github.com/Danny-Dasilva/CycleTLS/cycletls"
 )
 
-// TestHTTP3ConnectionLeakPrevention tests that HTTP/3 requests don't leak
+// TestHTTP3ConnectionLeakPrevention is skipped because it requires a real HTTP/3
+// server which is not available in unit/integration test environments. The httptest
+// package only provides HTTP/1.1 servers, so this test cannot meaningfully validate
+// HTTP/3 connection leak behavior.
+//
+// See TestHTTP1ConnectionCleanup for the equivalent test using HTTP/1.1.
+func TestHTTP3ConnectionLeakPrevention(t *testing.T) {
+	t.Skip("requires HTTP/3 test server - not available in unit/integration tests")
+}
+
+// TestHTTP1ConnectionCleanup tests that HTTP/1.1 requests don't leak
 // goroutines or connections over multiple requests.
 //
-// This test verifies the fix for the HTTP/3 connection leak where pre-dialed
-// connections were stored but never used by http3.Transport.
-func TestHTTP3ConnectionLeakPrevention(t *testing.T) {
-	// Create a test server
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-	}))
-	defer server.Close()
+// Note: This was previously named TestHTTP3ConnectionLeakPrevention but was
+// actually testing HTTP/1.1 connections via httptest.NewServer. Renamed for accuracy.
+func TestHTTP1ConnectionCleanup(t *testing.T) {
+	// Get baseline goroutine count after client initialization
+	runtime.GC()
+	time.Sleep(100 * time.Millisecond)
 
-	// Get baseline goroutine count
+	// Create client first, then measure baseline (client init creates goroutines)
+	client := cycletls.Init()
+	defer client.Close()
+
 	runtime.GC()
 	time.Sleep(100 * time.Millisecond)
 	baselineGoroutines := runtime.NumGoroutine()
 
-	// Create client and make multiple requests
-	client := cycletls.Init()
-	defer client.Close()
-
-	// Make several requests to trigger connection caching
+	// Make several requests to a real HTTPS endpoint
 	for i := 0; i < 10; i++ {
-		resp, err := client.Do(server.URL, cycletls.Options{
+		resp, err := client.Do("https://httpbin.org/get", cycletls.Options{
 			Method: "GET",
 		}, "GET")
 		if err != nil {
-			t.Logf("Request %d error (expected for HTTP/3 to HTTP/1.1 server): %v", i, err)
+			t.Logf("Request %d error: %v", i, err)
 		} else if resp.Status != 200 {
 			t.Logf("Request %d status: %d", i, resp.Status)
 		}

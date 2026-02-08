@@ -89,47 +89,65 @@ func TestBufferPool_DataCorruptionWithoutCopy(t *testing.T) {
 	}
 }
 
-// TestBufferPool_NoCopyCorruption shows the unsafe pattern where b.Bytes()
-// is sent to a channel and then the buffer is returned to the pool.
-// Another goroutine may reuse the buffer and overwrite the data.
-func TestBufferPool_NoCopyCorruption(t *testing.T) {
-	// This test demonstrates what happens WITHOUT the copy fix.
-	// We simulate the race by immediately reusing the buffer.
-	b := getTestBuffer()
-	b.WriteString("original data that should not change")
+// TestBufferPool_ResetOnReuse verifies that buffers retrieved from the pool
+// are properly reset (zero length) even if they contained data before being
+// returned. This is a deterministic test that forces pool reuse by putting
+// a buffer back and immediately getting one.
+func TestBufferPool_ResetOnReuse(t *testing.T) {
+	// Get a buffer and write data to it
+	buf := getTestBuffer()
+	buf.WriteString("test data that should be cleared")
 
-	// Get the slice backed by buffer internal memory
-	unsafeSlice := b.Bytes()
-	originalData := string(unsafeSlice)
+	if buf.Len() == 0 {
+		t.Fatal("buffer should have data after WriteString")
+	}
+
+	// Return to pool
+	putTestBuffer(buf)
+
+	// Immediately get a buffer - should get the same one back (pool reuse)
+	buf2 := getTestBuffer()
+
+	// getTestBuffer calls Reset(), so the buffer must be empty regardless
+	// of whether it's the same underlying buffer or a new allocation
+	if buf2.Len() != 0 {
+		t.Errorf("buffer not properly reset on reuse: Len()=%d, expected 0", buf2.Len())
+	}
+
+	// Write new data and verify it's clean (no residual data from previous use)
+	buf2.WriteString("new data")
+	if buf2.String() != "new data" {
+		t.Errorf("buffer contains unexpected data: got %q, expected %q", buf2.String(), "new data")
+	}
+
+	putTestBuffer(buf2)
+}
+
+// TestBufferPool_CopyBeforePutPreventsCorruption verifies that copying data
+// before returning a buffer to the pool prevents corruption when the pool
+// reuses the same underlying buffer.
+func TestBufferPool_CopyBeforePutPreventsCorruption(t *testing.T) {
+	// Get a buffer, write data, and take a SAFE copy before returning to pool
+	buf := getTestBuffer()
+	buf.WriteString("important data")
+
+	// Safe pattern: copy before returning to pool
+	safeCopy := make([]byte, buf.Len())
+	copy(safeCopy, buf.Bytes())
 
 	// Return buffer to pool
-	putTestBuffer(b)
+	putTestBuffer(buf)
 
-	// Simulate another goroutine getting the same buffer
-	b2 := getTestBuffer()
-	b2.WriteString("OVERWRITTEN DATA REPLACING ORIGINAL")
+	// Force reuse: get buffer back and overwrite it
+	buf2 := getTestBuffer()
+	buf2.WriteString("OVERWRITTEN COMPLETELY DIFFERENT DATA!!!")
 
-	// The unsafeSlice may now contain corrupted data
-	// because b2 may have reused the same underlying array
-	currentData := string(unsafeSlice[:len(originalData)])
-
-	// With copy fix, we would have:
-	safeCopy := make([]byte, len(originalData))
-	copy(safeCopy, []byte(originalData))
-
-	// safeCopy is always correct
-	if string(safeCopy) != "original data that should not change" {
-		t.Error("Safe copy should always preserve original data")
+	// The safe copy must still contain the original data
+	if string(safeCopy) != "important data" {
+		t.Errorf("safe copy was corrupted: got %q, expected %q", string(safeCopy), "important data")
 	}
 
-	// Log whether corruption actually happened (depends on pool behavior)
-	if currentData != originalData {
-		t.Logf("Corruption demonstrated: slice changed from %q to %q", originalData, currentData)
-	} else {
-		t.Logf("No corruption in this run (pool may have allocated a new buffer)")
-	}
-
-	putTestBuffer(b2)
+	putTestBuffer(buf2)
 }
 
 // TestBufferPool_ConcurrentSafety verifies that the copy-before-put pattern

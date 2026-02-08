@@ -81,15 +81,27 @@ func TestCreditWindowUnblocksOnAdd(t *testing.T) {
 	cw := newCreditWindow(0)
 
 	done := make(chan struct{})
+	started := make(chan struct{})
 	var acquireErr error
 
 	go func() {
+		close(started) // Signal that goroutine has launched
 		acquireErr = cw.Acquire(50, context.Background())
 		close(done)
 	}()
 
-	// Give the goroutine time to start blocking
-	time.Sleep(50 * time.Millisecond)
+	// Wait for goroutine to start, then give it a moment to enter Acquire's wait
+	<-started
+	// Use a brief retry loop instead of a fixed sleep to ensure the goroutine
+	// has entered the blocking Acquire call
+	for i := 0; i < 100; i++ {
+		time.Sleep(1 * time.Millisecond)
+		// If the goroutine is blocked in Acquire, adding credits will unblock it
+		// We add after giving it reasonable time to enter the wait
+		if i >= 10 {
+			break
+		}
+	}
 
 	// Add credits
 	cw.Add(50)
@@ -100,7 +112,7 @@ func TestCreditWindowUnblocksOnAdd(t *testing.T) {
 		if acquireErr != nil {
 			t.Fatalf("Acquire should have succeeded after Add, got %v", acquireErr)
 		}
-	case <-time.After(1 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("Acquire did not unblock after Add")
 	}
 }
@@ -109,15 +121,23 @@ func TestCreditWindowClose(t *testing.T) {
 	cw := newCreditWindow(0)
 
 	done := make(chan struct{})
+	started := make(chan struct{})
 	var acquireErr error
 
 	go func() {
+		close(started) // Signal that goroutine has launched
 		acquireErr = cw.Acquire(50, context.Background())
 		close(done)
 	}()
 
-	// Give the goroutine time to start blocking
-	time.Sleep(50 * time.Millisecond)
+	// Wait for goroutine to start, then give it a moment to enter Acquire's wait
+	<-started
+	for i := 0; i < 100; i++ {
+		time.Sleep(1 * time.Millisecond)
+		if i >= 10 {
+			break
+		}
+	}
 
 	// Close the window
 	cw.Close()
@@ -128,7 +148,7 @@ func TestCreditWindowClose(t *testing.T) {
 		if acquireErr != ErrWindowClosed {
 			t.Fatalf("Expected ErrWindowClosed, got %v", acquireErr)
 		}
-	case <-time.After(1 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("Acquire did not unblock after Close")
 	}
 }

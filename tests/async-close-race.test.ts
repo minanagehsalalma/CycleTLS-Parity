@@ -1,57 +1,97 @@
 /**
- * Tests for HTTP server async close race condition.
+ * Behavioral tests for HTTP server async close race condition.
+ *
+ * Instead of inspecting compiled source code for string patterns,
+ * these tests verify the actual behavior: that calling close() while
+ * requests are in-flight results in a clean shutdown without hanging
+ * promises or unhandled errors.
  */
 
+import CycleTLS from "../dist/index.js";
+
+jest.setTimeout(30000);
+
 describe("HTTP server async close race", () => {
-  test("error handler should call createClient inside close callback", () => {
-    const fs = require("fs");
-    const source = fs.readFileSync(
-      require.resolve("../dist/index.js"),
-      "utf8"
-    );
+  test("close() during in-flight request should not hang", async () => {
+    const client = new CycleTLS({
+      port: 9350 + Math.floor(Math.random() * 100),
+      autoSpawn: true,
+      timeout: 10000,
+    });
 
-    const methodStart = source.indexOf("checkSpawnedInstance(resolve, reject) {");
-    const nextMethodIdx = source.indexOf("spawnServer() {", methodStart);
-    const methodSource = source.substring(methodStart, nextMethodIdx);
+    // Start a request but don't await it yet
+    const requestPromise = client.get("https://httpbin.org/delay/2");
 
-    // Find error handler using string concat to avoid nested quote issues
-    const errorPattern = "once(" + String.fromCharCode(39) + "error" + String.fromCharCode(39);
-    const errorIdx = methodSource.indexOf(errorPattern);
-    expect(errorIdx).toBeGreaterThan(-1);
-    const errorHandler = methodSource.substring(errorIdx);
+    // Close immediately while request is in-flight
+    // This should complete without hanging
+    const closePromise = client.close();
 
-    // createClient should be inside the close callback
-    const closeCallbackStart = errorHandler.indexOf(".close(()");
-    expect(closeCallbackStart).toBeGreaterThan(-1);
+    // Both should settle (resolve or reject) within the timeout
+    const results = await Promise.allSettled([requestPromise, closePromise]);
 
-    const afterClose = errorHandler.substring(closeCallbackStart);
-    const createClientPos = afterClose.indexOf("createClient");
-    expect(createClientPos).toBeGreaterThan(0);
+    // close() should always resolve cleanly
+    expect(results[1].status).toBe("fulfilled");
 
-    const closingBracePos = afterClose.indexOf("});");
-    expect(createClientPos).toBeLessThan(closingBracePos);
+    // The request may resolve or reject (due to close), but should not hang
+    // We don't care about the specific outcome, just that it settled
+    expect(["fulfilled", "rejected"]).toContain(results[0].status);
   });
 
-  test("else branch should also call createClient when httpServer is null", () => {
-    const fs = require("fs");
-    const source = fs.readFileSync(
-      require.resolve("../dist/index.js"),
-      "utf8"
-    );
+  test("close() after successful request should clean up without errors", async () => {
+    const client = new CycleTLS({
+      port: 9360 + Math.floor(Math.random() * 100),
+      autoSpawn: true,
+      timeout: 10000,
+    });
 
-    const methodStart = source.indexOf("checkSpawnedInstance(resolve, reject) {");
-    const nextMethodIdx = source.indexOf("spawnServer() {", methodStart);
-    const methodSource = source.substring(methodStart, nextMethodIdx);
+    // Complete a request first
+    const response = await client.get("https://httpbin.org/get");
+    expect(response.statusCode).toBe(200);
 
-    const errorPattern = "once(" + String.fromCharCode(39) + "error" + String.fromCharCode(39);
-    const errorIdx = methodSource.indexOf(errorPattern);
-    const errorHandler = methodSource.substring(errorIdx);
+    // Consume body
+    for await (const _ of response.body) {
+      // drain
+    }
 
-    // Count createClient occurrences - should be >= 2
-    const matches = errorHandler.match(/createClient/g) || [];
-    expect(matches.length).toBeGreaterThanOrEqual(2);
+    // Close should complete cleanly
+    await expect(client.close()).resolves.not.toThrow();
+  });
 
-    // Should have an else branch
-    expect(errorHandler).toContain("else");
+  test("multiple close() calls should not throw or hang", async () => {
+    const client = new CycleTLS({
+      port: 9370 + Math.floor(Math.random() * 100),
+      autoSpawn: true,
+      timeout: 10000,
+    });
+
+    // Wait for client to be ready by making a request
+    const response = await client.get("https://httpbin.org/get");
+    expect(response.statusCode).toBe(200);
+    for await (const _ of response.body) {
+      // drain
+    }
+
+    // Call close() multiple times concurrently - should all resolve
+    const closeResults = await Promise.allSettled([
+      client.close(),
+      client.close(),
+      client.close(),
+    ]);
+
+    for (const result of closeResults) {
+      expect(result.status).toBe("fulfilled");
+    }
+  });
+
+  test("close() on never-used client should not hang", async () => {
+    const client = new CycleTLS({
+      port: 9380 + Math.floor(Math.random() * 100),
+      autoSpawn: true,
+      timeout: 5000,
+    });
+
+    // Close without ever making a request
+    // Should complete within a reasonable time
+    await expect(client.close()).resolves.not.toThrow();
   });
 });

@@ -6,7 +6,7 @@ let ja3 =
 let userAgent =
   "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:87.0) Gecko/20100101 Firefox/87.0";
 
-test("Multiple sequential GET requests should complete successfully", async () => {
+test("Multiple concurrent GET requests should complete successfully", async () => {
   // Use a random high port to avoid conflicts
   const port = 9200 + Math.floor(Math.random() * 100);
   await withCycleTLS({ port, timeout: 30000, autoSpawn: true }, async (cycleTLS) => {
@@ -16,14 +16,17 @@ test("Multiple sequential GET requests should complete successfully", async () =
       "https://httpbin.org/headers",
     ];
 
-    // Make requests sequentially
-    for (const url of urls) {
-      const response = await cycleTLS.get(url, {
+    // Make requests concurrently using Promise.all
+    const promises = urls.map(url =>
+      cycleTLS.get(url, {
         ja3: ja3,
         userAgent: userAgent,
-      });
+      })
+    );
+    const results = await Promise.all(promises);
 
-      // Verify response (V2 API uses statusCode)
+    // Verify all responses
+    for (const response of results) {
       expect(response.statusCode).toBe(200);
 
       // Consume body to properly complete request

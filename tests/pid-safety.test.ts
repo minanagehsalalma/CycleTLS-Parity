@@ -43,8 +43,9 @@ describe("pid undefined safety", () => {
 
   test("no non-null pid assertions should remain in process.kill calls", () => {
     const fs = require("fs");
+    const path = require("path");
     const tsSource = fs.readFileSync(
-      "/home/danny/Documents/TLS_SHIT/worktree-ts-fixes/src/index.ts",
+      path.resolve(__dirname, "..", "src", "index.ts"),
       "utf8"
     );
 

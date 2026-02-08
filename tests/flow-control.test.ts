@@ -144,8 +144,9 @@ describe("CycleTLS (V2 Protocol)", () => {
       // Note: This is a soft check - memory usage can vary due to GC timing
       // The main point is that we're not buffering the entire response
       const memoryIncrease = peakMemory - initialMemory;
-      // Allow up to 20MB increase (generous to account for GC variance)
-      expect(memoryIncrease).toBeLessThan(20 * 1024 * 1024);
+      // Allow up to 5MB increase for a 100KB download (accounts for GC variance)
+      const maxAllowedIncrease = 5 * 1024 * 1024; // 5MB
+      expect(memoryIncrease).toBeLessThan(maxAllowedIncrease);
     });
   });
 
