@@ -1,5 +1,7 @@
 import { spawn, ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "child_process";
 import path from "path";
+import fs from "fs";
+import crypto from "crypto";
 import { EventEmitter } from "events";
 import WebSocket from "ws";
 import * as http from "http";
@@ -9,9 +11,89 @@ import { Readable } from 'stream';
 import { Blob } from 'buffer';
 
 /**
- * Forcefully kill a child process, using platform-appropriate methods.
- * On Windows, uses taskkill since SIGKILL is not supported.
+ * Security: List of HTTP headers whose values should be redacted in debug logs.
+ * Prevents leaking credentials, tokens, and session data.
+ */
+const SENSITIVE_HEADERS = new Set([
+  'authorization', 'cookie', 'set-cookie', 'proxy-authorization',
+  'x-api-key', 'x-auth-token'
+]);
+
+/**
+ * Redact sensitive header values for safe logging.
+ * Returns a copy of headers with sensitive values replaced by "[REDACTED]".
+ */
+function redactHeaders(headers: Record<string, string | string[]>): Record<string, string | string[]> {
+  const redacted: Record<string, string | string[]> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (SENSITIVE_HEADERS.has(key.toLowerCase())) {
+      redacted[key] = '[REDACTED]';
+    } else {
+      redacted[key] = value;
+    }
+  }
+  return redacted;
+}
+
+/**
+ * Validate an executable path for security.
+ * Prevents path traversal and symlink attacks.
+ */
+function validateExecutablePath(execPath: string): string {
+  // Resolve to absolute path to prevent traversal
+  const resolved = path.resolve(execPath);
+
+  // Check the file exists
+  if (!fs.existsSync(resolved)) {
+    throw new Error(`Executable not found at path: ${resolved}`);
+  }
+
+  // Check it's a regular file (not a directory, symlink to unexpected location, etc.)
+  const stats = fs.lstatSync(resolved);
+  if (!stats.isFile()) {
+    throw new Error(`Executable path is not a regular file: ${resolved}`);
+  }
+
+  // If it's a symlink, resolve and validate the target
+  if (stats.isSymbolicLink()) {
+    const realPath = fs.realpathSync(resolved);
+    const realStats = fs.statSync(realPath);
+    if (!realStats.isFile()) {
+      throw new Error(`Executable symlink target is not a regular file: ${realPath}`);
+    }
+  }
+
+  return resolved;
+}
+
+/**
+ * Generate a cryptographically random authentication token.
+ */
+function generateAuthToken(): string {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+/**
+ * Check if a process is still alive by sending signal 0.
+ * Returns false if the process does not exist (ESRCH).
+ */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+/**
+ * Gracefully kill a child process with SIGTERM first, then SIGKILL after timeout.
+ * On Windows, uses taskkill since SIGKILL/SIGTERM are not supported.
  * On Unix, kills the process group (negative PID) for detached processes.
+ *
+ * Security fixes applied:
+ * - Issue #8: Sends SIGTERM first with a 5-second grace period before SIGKILL
+ * - Issue #9: Validates PID is still alive before process group kill (TOCTOU mitigation)
  */
 function forceKillProcess(
   child: ChildProcessWithoutNullStreams,
@@ -30,17 +112,44 @@ function forceKillProcess(
       try { child.kill(); } catch { /* Process already dead */ }
     }
   } else {
-    if (killGroup && child.pid !== undefined) {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
-          console.error("Error killing process group:", error);
+    // Issue #8: Send SIGTERM first for graceful shutdown
+    try {
+      if (killGroup && child.pid !== undefined) {
+        // Issue #9: Validate PID is still alive before group kill
+        if (isProcessAlive(child.pid)) {
+          process.kill(-child.pid, "SIGTERM");
         }
+      } else {
+        child.kill("SIGTERM");
       }
-    } else {
-      try { child.kill("SIGKILL"); } catch { /* Process already dead */ }
+    } catch {
+      // Process already dead - no need to continue
+      return;
     }
+
+    // Schedule SIGKILL after grace period if process hasn't exited
+    const gracePeriodMs = 5000;
+    setTimeout(() => {
+      if (child.pid === undefined) return;
+
+      // Check if process is still alive before sending SIGKILL
+      if (!isProcessAlive(child.pid)) return;
+
+      if (killGroup) {
+        // Issue #9: Re-validate PID before group kill
+        if (isProcessAlive(child.pid)) {
+          try {
+            process.kill(-child.pid, "SIGKILL");
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+              console.error("Error killing process group:", error);
+            }
+          }
+        }
+      } else {
+        try { child.kill("SIGKILL"); } catch { /* Process already dead */ }
+      }
+    }, gracePeriodMs).unref(); // unref() so timer doesn't prevent Node from exiting
   }
 }
 
@@ -297,6 +406,12 @@ export interface CycleTLSRequestOptions {
   orderAsProvided?: boolean;
   /** Skip TLS certificate verification (use with caution) */
   insecureSkipVerify?: boolean;
+  /**
+   * Skip TLS certificate verification for proxy connections.
+   * Defaults to true for backward compatibility since proxies commonly use self-signed certs.
+   * Set to false to require valid proxy certificates.
+   */
+  proxyInsecureSkipVerify?: boolean;
   /** Controls whether connections are pooled and reused between requests (default: true) */
   enableConnectionReuse?: boolean;
 
@@ -522,6 +637,7 @@ class SharedInstance extends EventEmitter {
   private isShuttingDown: boolean = false;
   private httpServer: http.Server | null = null;
   private initializationReject: ((reason: string) => void) | null = null;
+  private authToken: string = ''; // Issue #4: WebSocket auth token
 
   constructor(port: number, debug: boolean, timeout: number, executablePath?: string) {
     super();
@@ -651,8 +767,8 @@ class SharedInstance extends EventEmitter {
       let execPath: string;
 
       if (this.executablePath) {
-        // If filePath is provided, use it directly
-        execPath = this.executablePath;
+        // Issue #1: Validate user-provided executable path
+        execPath = validateExecutablePath(this.executablePath);
       } else {
         // Otherwise, construct path relative to __dirname
         execPath = path.join(__dirname, fileName);
@@ -662,12 +778,18 @@ class SharedInstance extends EventEmitter {
       execPath = execPath.replace(/"/g, '');
 
       // Verify file exists before attempting to spawn
-      if (!require('fs').existsSync(execPath)) {
+      if (!fs.existsSync(execPath)) {
         throw new Error(`Executable not found at path: ${execPath}`);
       }
 
+      // Issue #4: Generate auth token for WebSocket authentication
+      this.authToken = generateAuthToken();
+
       const spawnOptions: SpawnOptionsWithoutStdio = {
-        env: { WS_PORT: this.port.toString() },
+        env: {
+          WS_PORT: this.port.toString(),
+          WS_AUTH_TOKEN: this.authToken, // Issue #4: Pass token to child process
+        },
         shell: process.platform !== "win32", // false for Windows, true for others
         windowsHide: true,
         detached: process.platform !== "win32",
@@ -678,7 +800,11 @@ class SharedInstance extends EventEmitter {
       this.child = spawn(execPath, [], spawnOptions);
 
       this.child.stdout.on("data", (stdout) => {
-        console.log(stdout.toString());
+        // Issue #5: Don't log stdout if it contains auth token
+        const output = stdout.toString();
+        if (!output.includes('WS_AUTH_TOKEN=')) {
+          console.log(output);
+        }
       });
 
       this.child.stderr.on("data", (stderr) => {
@@ -726,7 +852,9 @@ class SharedInstance extends EventEmitter {
   private createClient(resolve: () => void, reject: (reason: string) => void): void {
     const attemptConnection = () => {
       // Use ?v=1 to request legacy JSON protocol (V2 flow-control is now default)
-      const server = new WebSocket(`ws://localhost:${this.port}?v=1`);
+      // Issue #4: Include auth token in WebSocket connection for authentication
+      const tokenParam = this.authToken ? `&token=${this.authToken}` : '';
+      const server = new WebSocket(`ws://localhost:${this.port}?v=1${tokenParam}`);
 
       server.on("open", () => {
         // When connected, clear the connection timeout if it exists.
@@ -1781,6 +1909,10 @@ function createResponseMethods(rawBuffer: Buffer, headers: HttpHeaders) {
     }
   };
 }
+/**
+ * PacketBuffer provides sequential reading of typed values from a binary buffer.
+ * Issue #2: All read methods include bounds checking to prevent buffer overflows.
+ */
 class PacketBuffer {
 
   private _data: Buffer;
@@ -1791,49 +1923,81 @@ class PacketBuffer {
     this._index = 0;
   }
 
+  private _remaining(): number {
+    return this._data.length - this._index;
+  }
+
   readU8(): number {
+    if (this._remaining() < 1) {
+      throw new Error(`PacketBuffer underflow: need 1 byte, have ${this._remaining()}`);
+    }
     return this._data[this._index++];
   }
 
   readU16(): number {
-    return this.readU8() << 8
-      | this.readU8();
+    if (this._remaining() < 2) {
+      throw new Error(`PacketBuffer underflow: need 2 bytes, have ${this._remaining()}`);
+    }
+    const v = (this._data[this._index] << 8) | this._data[this._index + 1];
+    this._index += 2;
+    return v >>> 0; // ensure unsigned
   }
 
   readU32(): number {
-    return this.readU8() << 24
-      | this.readU8() << 16
-      | this.readU8() << 8
-      | this.readU8();
+    if (this._remaining() < 4) {
+      throw new Error(`PacketBuffer underflow: need 4 bytes, have ${this._remaining()}`);
+    }
+    const v = (this._data[this._index] << 24)
+      | (this._data[this._index + 1] << 16)
+      | (this._data[this._index + 2] << 8)
+      | this._data[this._index + 3];
+    this._index += 4;
+    return v >>> 0; // ensure unsigned
   }
 
   readU64(): bigint {
-    const high = (BigInt(this.readU8()) << 56n) |
-      (BigInt(this.readU8()) << 48n) |
-      (BigInt(this.readU8()) << 40n) |
-      (BigInt(this.readU8()) << 32n);
-    const low = (BigInt(this.readU8()) << 24n) |
-      (BigInt(this.readU8()) << 16n) |
-      (BigInt(this.readU8()) << 8n) |
-      BigInt(this.readU8());
+    if (this._remaining() < 8) {
+      throw new Error(`PacketBuffer underflow: need 8 bytes, have ${this._remaining()}`);
+    }
+    const high = (BigInt(this._data[this._index]) << 56n) |
+      (BigInt(this._data[this._index + 1]) << 48n) |
+      (BigInt(this._data[this._index + 2]) << 40n) |
+      (BigInt(this._data[this._index + 3]) << 32n);
+    const low = (BigInt(this._data[this._index + 4]) << 24n) |
+      (BigInt(this._data[this._index + 5]) << 16n) |
+      (BigInt(this._data[this._index + 6]) << 8n) |
+      BigInt(this._data[this._index + 7]);
+    this._index += 8;
     return high | low;
   }
 
   readBytes(is64: boolean): Buffer {
     const len = is64 ? Number(this.readU64()) : this.readU32();
+    // Issue #2: Validate length does not exceed remaining buffer
+    if (len < 0) {
+      throw new Error(`PacketBuffer: negative length ${len}`);
+    }
+    if (len > this._remaining()) {
+      throw new Error(`PacketBuffer underflow: need ${len} bytes, have ${this._remaining()}`);
+    }
+    // Issue #6: Enforce max read size (10MB)
+    const MAX_READ_BYTES = 10 * 1024 * 1024;
+    if (len > MAX_READ_BYTES) {
+      throw new Error(`PacketBuffer: read size ${len} exceeds maximum ${MAX_READ_BYTES}`);
+    }
     const bytes = this._data.subarray(this._index, this._index + len);
-
     this._index += len;
-
     return bytes;
   }
 
   readString(encoding?: BufferEncoding): string {
     const len = this.readU16();
+    // Issue #2: Validate string length against remaining buffer
+    if (len > this._remaining()) {
+      throw new Error(`PacketBuffer underflow: string length ${len} exceeds remaining ${this._remaining()}`);
+    }
     const bytes = this._data.subarray(this._index, this._index + len);
-
     this._index += len;
-
     return bytes.toString(encoding);
   }
 }

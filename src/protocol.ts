@@ -6,20 +6,43 @@
  */
 
 /**
+ * Maximum string length for protocol encoding (uint16 length prefix = max 65535).
+ */
+const MAX_STRING_LEN = 65535;
+
+/**
  * BufferWriter simplifies building binary packets.
+ * Issue #2: All write methods include range validation to prevent overflows.
  */
 class BufferWriter {
   private parts: Buffer[] = [];
 
   writeString(s: string): void {
     const strBuf = Buffer.from(s, "utf8");
+    if (strBuf.length > MAX_STRING_LEN) {
+      throw new Error(
+        `String byte length ${strBuf.length} exceeds maximum ${MAX_STRING_LEN} for protocol encoding`
+      );
+    }
     const len = Buffer.alloc(2);
     len.writeUInt16BE(strBuf.length, 0);
     this.parts.push(len);
     this.parts.push(strBuf);
   }
 
+  writeU16(v: number): void {
+    if (v < 0 || v > 65535) {
+      throw new RangeError(`U16 value ${v} out of range [0, 65535]`);
+    }
+    const buf = Buffer.alloc(2);
+    buf.writeUInt16BE(v, 0);
+    this.parts.push(buf);
+  }
+
   writeU32(v: number): void {
+    if (v < 0 || v > 4294967295) {
+      throw new RangeError(`U32 value ${v} out of range [0, 4294967295]`);
+    }
     const buf = Buffer.alloc(4);
     buf.writeUInt32BE(v, 0);
     this.parts.push(buf);
@@ -59,6 +82,10 @@ export function buildCreditPacket(requestId: string, credits: number): Buffer {
 
 /**
  * BufferReader simplifies parsing binary packets.
+ */
+/**
+ * BufferReader simplifies parsing binary packets.
+ * Issue #2: All read methods include bounds checking to prevent underflows.
  */
 export class BufferReader {
   private offset = 0;

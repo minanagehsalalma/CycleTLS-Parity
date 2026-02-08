@@ -3,7 +3,9 @@ package cycletls
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -22,6 +24,16 @@ import (
 	"github.com/gorilla/websocket"
 	utls "github.com/refraction-networking/utls"
 )
+
+// wsAuthToken is the authentication token for WebSocket connections.
+// Generated at startup and passed to the child process via environment variable.
+var wsAuthToken string
+
+// wsRateLimiter limits the rate of incoming WebSocket messages.
+var wsRateLimiter *RateLimiter
+
+// wsConcurrentTracker limits concurrent in-flight requests.
+var wsConcurrentTracker *ConcurrentRequestTracker
 
 // safeChannelWriter wraps a channel to provide thread-safe writes with closed state tracking
 type safeChannelWriter struct {
@@ -153,14 +165,14 @@ type WebSocketCommand struct {
 // browserFromOptions creates a Browser configuration from request options
 func browserFromOptions(opts Options) Browser {
 	return Browser{
-		JA3:                opts.Ja3,
-		JA4r:               opts.Ja4r,
-		HTTP2Fingerprint:   opts.HTTP2Fingerprint,
-		QUICFingerprint:    opts.QUICFingerprint,
-		DisableGrease:      opts.DisableGrease,
-		UserAgent:          opts.UserAgent,
-		ServerName:         opts.ServerName,
-		Cookies:            opts.Cookies,
+		JA3:                     opts.Ja3,
+		JA4r:                    opts.Ja4r,
+		HTTP2Fingerprint:        opts.HTTP2Fingerprint,
+		QUICFingerprint:         opts.QUICFingerprint,
+		DisableGrease:           opts.DisableGrease,
+		UserAgent:               opts.UserAgent,
+		ServerName:              opts.ServerName,
+		Cookies:                 opts.Cookies,
 		InsecureSkipVerify:      opts.InsecureSkipVerify,
 		ProxyInsecureSkipVerify: opts.ProxyInsecureSkipVerify,
 		ForceHTTP1:              opts.ForceHTTP1,
@@ -1529,6 +1541,13 @@ func readSocket(chanRead chan fullRequest, wsSocket *websocket.Conn) {
 			debugLogger.Printf("Socket Error: %v", err)
 			return
 		}
+
+		// Issue #7: Rate limiting on local WebSocket
+		if wsRateLimiter != nil && !wsRateLimiter.Allow() {
+			debugLogger.Printf("Rate limit exceeded, dropping message")
+			continue
+		}
+
 		var baseMessage map[string]interface{}
 		if err := json.Unmarshal(message, &baseMessage); err != nil {
 			log.Print("Unmarshal Error", err)
@@ -1637,7 +1656,19 @@ func readSocket(chanRead chan fullRequest, wsSocket *websocket.Conn) {
 // Worker
 func readProcess(chanRead chan fullRequest, chanWrite *safeChannelWriter) {
 	for request := range chanRead {
-		go dispatcherAsync(request, chanWrite)
+		// Issue #7: Check concurrent request limit
+		if wsConcurrentTracker != nil && !wsConcurrentTracker.TryAcquire() {
+			debugLogger.Printf("Max concurrent requests reached, rejecting request %s", request.options.RequestID)
+			// Send error response for rejected request
+			sendPanicError(chanWrite, request.options.RequestID, "max concurrent requests exceeded")
+			continue
+		}
+		go func(req fullRequest) {
+			if wsConcurrentTracker != nil {
+				defer wsConcurrentTracker.Release()
+			}
+			dispatcherAsync(req, chanWrite)
+		}(request)
 	}
 }
 
@@ -1649,6 +1680,18 @@ var upgrader = websocket.Upgrader{
 // WSEndpoint exports the main cycletls function as we websocket connection that clients can connect to
 func WSEndpoint(w nhttp.ResponseWriter, r *nhttp.Request) {
 	upgrader.CheckOrigin = func(r *nhttp.Request) bool { return true }
+
+	// Issue #4: Validate WebSocket authentication token
+	if wsAuthToken != "" {
+		token := r.Header.Get("X-CycleTLS-Token")
+		if token == "" {
+			token = r.URL.Query().Get("token")
+		}
+		if token != wsAuthToken {
+			nhttp.Error(w, "Unauthorized: invalid or missing authentication token", nhttp.StatusUnauthorized)
+			return
+		}
+	}
 
 	// upgrade this connection to a WebSocket
 	// connection
@@ -1719,6 +1762,16 @@ func setupRoutes() {
 	nhttp.HandleFunc("/", WSEndpoint)
 }
 
+// generateAuthToken creates a cryptographically random hex token.
+func generateAuthToken() string {
+	b := make([]byte, 32) // 256-bit token
+	if _, err := rand.Read(b); err != nil {
+		// Fallback: use a less secure but functional token
+		return fmt.Sprintf("cycletls-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
 func main() {
 	port, exists := os.LookupEnv("WS_PORT")
 	var addr *string
@@ -1729,6 +1782,19 @@ func main() {
 	}
 
 	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	// Issue #4: Load auth token from environment (set by parent process)
+	wsAuthToken = os.Getenv("WS_AUTH_TOKEN")
+	if wsAuthToken == "" {
+		// If no token provided by parent, generate one and print it
+		// so the parent process can read it from stdout
+		wsAuthToken = generateAuthToken()
+		fmt.Printf("WS_AUTH_TOKEN=%s\n", wsAuthToken)
+	}
+
+	// Issue #7: Initialize rate limiter and concurrent request tracker
+	wsRateLimiter = NewRateLimiter(DefaultWSRateLimitPerSec, DefaultWSBurst)
+	wsConcurrentTracker = NewConcurrentRequestTracker(DefaultMaxConcurrentRequests)
 
 	setupRoutes()
 	log.Fatal(nhttp.ListenAndServe(*addr, nil))

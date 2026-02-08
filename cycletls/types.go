@@ -69,7 +69,7 @@ type Options struct {
 	HeaderOrder        []string `json:"headerOrder"`
 	OrderAsProvided    bool     `json:"orderAsProvided"` //TODO
 	InsecureSkipVerify      bool  `json:"insecureSkipVerify"`
-	ProxyInsecureSkipVerify *bool `json:"proxyInsecureSkipVerify"` // TLS verification for proxy connections. Defaults to true for backward compat. Set to false to verify proxy certificates.
+	ProxyInsecureSkipVerify *bool `json:"proxyInsecureSkipVerify,omitempty"` // TLS verification for proxy connections. Defaults to true for backward compat. Set to false to verify proxy certificates.
 
 	// Protocol options
 	ForceHTTP1 bool   `json:"forceHTTP1"`
@@ -81,6 +81,9 @@ type Options struct {
 
 	// Connection reuse options
 	EnableConnectionReuse bool `json:"enableConnectionReuse"` // Enable connection reuse across requests (default: true)
+
+	// Certificate pinning (optional)
+	CertPins []string `json:"certPins,omitempty"` // SHA256 certificate fingerprints for pinning (hex-encoded)
 }
 
 // cycleTLSRequest represents an internal request with ID and options.

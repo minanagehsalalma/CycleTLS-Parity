@@ -237,14 +237,12 @@ func createNewClient(browser Browser, timeout int, disableRedirect bool, userAge
 	var dialer proxy.ContextDialer
 	if len(proxyURL) > 0 && len(proxyURL[0]) > 0 {
 		var err error
-		// Proxy TLS verification is separate from target TLS verification.
-		// Default: InsecureSkipVerify=true for proxy connections (backward compat,
-		// since proxies commonly use self-signed certificates).
-		// Users can explicitly set ProxyInsecureSkipVerify=false to verify proxy certs.
-		proxyInsecureSkipVerify := true // default for backward compat
-		if browser.ProxyInsecureSkipVerify != nil {
-			proxyInsecureSkipVerify = *browser.ProxyInsecureSkipVerify
-		}
+		// Proxy TLS connections use a separate InsecureSkipVerify setting.
+		// This defaults to true for backward compatibility since proxies
+		// commonly use self-signed certificates. Users can override via
+		// ProxyInsecureSkipVerify option (pointer allows distinguishing
+		// "not set" from "set to false").
+		proxyInsecureSkipVerify := getProxyInsecureSkipVerify(browser)
 		dialer, err = newConnectDialer(proxyURL[0], userAgent, proxyInsecureSkipVerify)
 		if err != nil {
 			return fhttp.Client{
