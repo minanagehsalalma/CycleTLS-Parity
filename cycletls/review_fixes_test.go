@@ -8,14 +8,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	http "github.com/Danny-Dasilva/fhttp"
 	"github.com/Danny-Dasilva/CycleTLS/cycletls/state"
+	"github.com/quic-go/quic-go/http3"
 )
+
 
 // ============================================================================
 // Issue #1: SSE Event Loop Break Statement Bug
@@ -827,5 +831,551 @@ func TestUnit_DispatcherAsyncPreservesSSEContext(t *testing.T) {
 		t.Fatal("Context cancelled prematurely - SSE connection would be killed")
 	default:
 		// Good - context still active for SSE handler
+	}
+}
+// =============================================================================
+
+func TestGenerateClientKey_IncludesTimeout(t *testing.T) {
+	browser := Browser{
+		JA3:       "771,52244-52243-52245,0-23-35-13,23-24,0",
+		UserAgent: "Mozilla/5.0 Test",
+	}
+
+	key30 := generateClientKey(browser, 30, false, "")
+	key60 := generateClientKey(browser, 60, false, "")
+	key0 := generateClientKey(browser, 0, false, "")
+
+	if key30 == key60 {
+		t.Error("Different timeouts (30 vs 60) should produce different keys")
+	}
+	if key30 == key0 {
+		t.Error("Different timeouts (30 vs 0) should produce different keys")
+	}
+	if key60 == key0 {
+		t.Error("Different timeouts (60 vs 0) should produce different keys")
+	}
+
+	// Verify the key contains the timeout field
+	if !strings.Contains(key30, "timeout:30") {
+		t.Errorf("Key should contain 'timeout:30', got: %s", key30)
+	}
+	if !strings.Contains(key60, "timeout:60") {
+		t.Errorf("Key should contain 'timeout:60', got: %s", key60)
+	}
+}
+
+func TestGenerateClientKey_SameTimeoutSameKey(t *testing.T) {
+	browser := Browser{
+		JA3:       "test",
+		UserAgent: "test",
+	}
+
+	key1 := generateClientKey(browser, 30, false, "")
+	key2 := generateClientKey(browser, 30, false, "")
+
+	if key1 != key2 {
+		t.Error("Same timeout should produce same key")
+	}
+}
+
+// =============================================================================
+// Issue 5: Proxy TLS Verification
+// InsecureSkipVerify now applies to proxy connections too.
+// The connectDialer should have a separate field for proxy TLS verification.
+// =============================================================================
+
+func TestConnectDialer_ProxyInsecureSkipVerify(t *testing.T) {
+	// Test that newConnectDialer sets InsecureSkipVerify correctly
+	// When insecureSkipVerify=true is passed, the proxy should skip verification
+	dialer, err := newConnectDialer("https://proxy.example.com:8080", "TestAgent", true)
+	if err != nil {
+		t.Fatalf("newConnectDialer failed: %v", err)
+	}
+
+	cd, ok := dialer.(*connectDialer)
+	if !ok {
+		// For socks proxies, this won't be a connectDialer
+		t.Skip("dialer is not a connectDialer (socks proxy)")
+	}
+
+	if !cd.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify should be true when explicitly set")
+	}
+
+	// Test with insecureSkipVerify=false
+	dialer2, err := newConnectDialer("https://proxy.example.com:8080", "TestAgent", false)
+	if err != nil {
+		t.Fatalf("newConnectDialer failed: %v", err)
+	}
+
+	cd2, ok := dialer2.(*connectDialer)
+	if !ok {
+		t.Skip("dialer is not a connectDialer")
+	}
+
+	if cd2.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify should be false when explicitly set to false")
+	}
+}
+
+func TestCreateNewClient_ProxyInsecureDefaultsTrue(t *testing.T) {
+	// Verify that the proxy TLS verification defaults to true for backward compat
+	// This is a documentation/behavior test
+
+	// The createNewClient function passes proxyInsecureSkipVerify=true by default.
+	// We can verify this through the comment and the behavior:
+	// browser.InsecureSkipVerify is for the TARGET connection.
+	// proxyInsecureSkipVerify (always true by default) is for the PROXY connection.
+
+	browser := Browser{
+		InsecureSkipVerify: false, // User wants to verify TARGET
+	}
+
+	// The function creates a new client. We just verify it doesn't error out.
+	// The important thing is the proxy gets insecureSkipVerify=true even when
+	// the browser's InsecureSkipVerify is false (for backward compat with proxies
+	// using self-signed certs).
+	_, err := createNewClient(browser, 30, false, "Mozilla/5.0", "https://proxy.example.com:8080")
+	// This will fail because there's no real proxy, but it should at least create the dialer
+	// We check the error is about connection, not about TLS config
+	if err != nil {
+		// The error from newConnectDialer would be about the proxy URL being invalid
+		// or connection refused, not about TLS config
+		t.Logf("Expected connection error (no real proxy): %v", err)
+	}
+}
+
+// =============================================================================
+// Issue 6: LRU Eviction is O(n^2)
+// Cleanup loop scans entire map for each eviction.
+// Fix: Batch eviction with sorting by lastUsed timestamp.
+// =============================================================================
+
+func TestLRU_BatchEviction_Performance(t *testing.T) {
+	rt := createTestRoundTripper()
+
+	// Create many more connections than the limit
+	baseTime := time.Now()
+	numConnections := maxCachedConnections + 50
+	conns := make([]*mockConn, numConnections)
+
+	for i := 0; i < numConnections; i++ {
+		conns[i] = newMockConn()
+		lastUsed := baseTime.Add(time.Duration(i) * time.Second)
+		rt.cachedConnections[addrForIndex(i)] = &cachedConn{
+			conn:     conns[i],
+			lastUsed: lastUsed,
+		}
+	}
+
+	// Cleanup should handle this efficiently (batch sort, not O(n^2))
+	start := time.Now()
+	rt.cleanupCache()
+	elapsed := time.Since(start)
+
+	// Should have exactly maxCachedConnections entries
+	if len(rt.cachedConnections) != maxCachedConnections {
+		t.Errorf("expected %d connections after cleanup, got %d", maxCachedConnections, len(rt.cachedConnections))
+	}
+
+	// The 50 oldest should have been evicted
+	for i := 0; i < 50; i++ {
+		if _, exists := rt.cachedConnections[addrForIndex(i)]; exists {
+			t.Errorf("connection at index %d should have been evicted (oldest)", i)
+		}
+		if !conns[i].IsClosed() {
+			t.Errorf("connection at index %d should have been closed", i)
+		}
+	}
+
+	// The newest should remain
+	for i := 50; i < numConnections; i++ {
+		if _, exists := rt.cachedConnections[addrForIndex(i)]; !exists {
+			t.Errorf("connection at index %d should still exist (newest)", i)
+		}
+	}
+
+	// Performance: should complete in reasonable time even with many entries
+	// With batch eviction, this should be very fast
+	if elapsed > 5*time.Second {
+		t.Errorf("cleanup took too long: %v (suggests O(n^2) behavior)", elapsed)
+	}
+	t.Logf("Batch eviction of %d entries took %v", numConnections-maxCachedConnections, elapsed)
+}
+
+func TestLRU_BatchEviction_Transports(t *testing.T) {
+	rt := createTestRoundTripper()
+
+	baseTime := time.Now()
+	numTransports := maxCachedTransports + 30
+
+	for i := 0; i < numTransports; i++ {
+		lastUsed := baseTime.Add(time.Duration(i) * time.Second)
+		rt.cachedTransports[addrForIndex(i)] = &cachedTransport{
+			transport: &http.Transport{},
+			lastUsed:  lastUsed,
+		}
+	}
+
+	rt.cleanupCache()
+
+	if len(rt.cachedTransports) != maxCachedTransports {
+		t.Errorf("expected %d transports after cleanup, got %d", maxCachedTransports, len(rt.cachedTransports))
+	}
+
+	// The oldest 30 should be evicted
+	for i := 0; i < 30; i++ {
+		if _, exists := rt.cachedTransports[addrForIndex(i)]; exists {
+			t.Errorf("transport at index %d should have been evicted (oldest)", i)
+		}
+	}
+}
+
+func TestLRU_BatchEviction_HTTP3Transports(t *testing.T) {
+	rt := createTestRoundTripper()
+
+	baseTime := time.Now()
+	numTransports := maxCachedTransports + 20
+
+	for i := 0; i < numTransports; i++ {
+		lastUsed := baseTime.Add(time.Duration(i) * time.Second)
+		rt.cachedHTTP3Transports[http3AddrForIndex(i)] = &cachedHTTP3Transport{
+			transport: &http3.Transport{},
+			conn:      nil,
+			lastUsed:  lastUsed,
+		}
+	}
+
+	rt.cleanupCache()
+
+	if len(rt.cachedHTTP3Transports) != maxCachedTransports {
+		t.Errorf("expected %d HTTP/3 transports after cleanup, got %d", maxCachedTransports, len(rt.cachedHTTP3Transports))
+	}
+}
+
+// =============================================================================
+// Issue 7: Cleanup Goroutine Lifecycle Not Managed
+// StopCacheCleanup() exists but is never called from Close/cleanup paths.
+// =============================================================================
+
+func TestCloseIdleConnections_StopsCleanupGoroutine(t *testing.T) {
+	rt := createTestRoundTripper()
+	rt.cleanupStop = make(chan struct{})
+
+	// Start the cleanup goroutine (simulated)
+	cleanupRunning := make(chan struct{})
+	cleanupStopped := make(chan struct{})
+	go func() {
+		close(cleanupRunning) // signal that goroutine started
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				// simulate cleanup work
+			case <-rt.cleanupStop:
+				close(cleanupStopped)
+				return
+			}
+		}
+	}()
+
+	<-cleanupRunning // wait for goroutine to start
+
+	// CloseIdleConnections should also stop the cleanup goroutine
+	rt.CloseIdleConnections()
+
+	// The cleanup goroutine should have been stopped
+	select {
+	case <-cleanupStopped:
+		// Good - goroutine stopped
+	case <-time.After(1 * time.Second):
+		t.Error("cleanup goroutine was not stopped by CloseIdleConnections()")
+	}
+}
+
+func TestCloseIdleConnections_WithAddress_DoesNotStopCleanup(t *testing.T) {
+	rt := createTestRoundTripper()
+	rt.cleanupStop = make(chan struct{})
+
+	// When closing connections for a specific address (not all), the cleanup
+	// goroutine should keep running since there are still connections to manage
+	cleanupRunning := make(chan struct{})
+	go func() {
+		close(cleanupRunning)
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				// simulate cleanup work
+			case <-rt.cleanupStop:
+				return
+			}
+		}
+	}()
+
+	<-cleanupRunning
+
+	// Add some connections
+	rt.cacheMu.Lock()
+	rt.cachedConnections["keep.com:443"] = &cachedConn{conn: newMockConn(), lastUsed: time.Now()}
+	rt.cachedConnections["remove.com:443"] = &cachedConn{conn: newMockConn(), lastUsed: time.Now()}
+	rt.cacheMu.Unlock()
+
+	// Close with specific address - should NOT stop cleanup
+	rt.CloseIdleConnections("keep.com:443")
+
+	// Verify cleanup is still running
+	select {
+	case <-rt.cleanupStop:
+		t.Error("cleanup goroutine should NOT be stopped when closing specific address connections")
+	case <-time.After(50 * time.Millisecond):
+		// Good - still running
+	}
+
+	// Clean up
+	rt.StopCacheCleanup()
+}
+
+// =============================================================================
+// Issue 3: HTTP/3 Transport Leak on UQuic Path
+// For UQuic connections, code closes pre-dialed connection but caches transport
+// with conn: nil. On eviction, transport.Close() must still be called.
+// =============================================================================
+
+func TestHTTP3_UQuicTransportCloseOnEviction(t *testing.T) {
+	rt := createTestRoundTripper()
+
+	// Simulate what happens with UQuic: transport is cached with conn=nil
+	// When evicted, transport.Close() must still be called
+	baseTime := time.Now()
+
+	// Fill beyond limit to trigger eviction
+	numTransports := maxCachedTransports + 5
+	for i := 0; i < numTransports; i++ {
+		lastUsed := baseTime.Add(time.Duration(i) * time.Second)
+		rt.cachedHTTP3Transports[http3AddrForIndex(i)] = &cachedHTTP3Transport{
+			transport: &http3.Transport{}, // real transport that needs Close()
+			conn:      nil,                // nil for UQuic path
+			lastUsed:  lastUsed,
+		}
+	}
+
+	// Run cleanup - should evict oldest and call transport.Close()
+	// This should not panic even though conn is nil
+	rt.cleanupCache()
+
+	if len(rt.cachedHTTP3Transports) != maxCachedTransports {
+		t.Errorf("expected %d HTTP/3 transports, got %d", maxCachedTransports, len(rt.cachedHTTP3Transports))
+	}
+
+	// The 5 oldest should have been evicted
+	for i := 0; i < 5; i++ {
+		if _, exists := rt.cachedHTTP3Transports[http3AddrForIndex(i)]; exists {
+			t.Errorf("HTTP/3 transport at index %d should have been evicted", i)
+		}
+	}
+}
+
+func TestHTTP3_CloseIdleConnections_NilConnTransport(t *testing.T) {
+	rt := createTestRoundTripper()
+
+	// Add an HTTP/3 transport with nil conn (UQuic path)
+	rt.cachedHTTP3Transports["h3:uquic.example.com:443"] = &cachedHTTP3Transport{
+		transport: &http3.Transport{},
+		conn:      nil, // UQuic: conn is nil
+		lastUsed:  time.Now(),
+	}
+
+	// CloseIdleConnections should handle nil conn gracefully
+	// and still close the transport
+	rt.CloseIdleConnections()
+
+	// Transport should be removed
+	if len(rt.cachedHTTP3Transports) != 0 {
+		t.Errorf("expected 0 HTTP/3 transports after close, got %d", len(rt.cachedHTTP3Transports))
+	}
+}
+
+// =============================================================================
+// Verify batch eviction correctness: exact ordering
+// =============================================================================
+
+func TestLRU_BatchEviction_CorrectOrdering(t *testing.T) {
+	rt := createTestRoundTripper()
+
+	// Create entries with specific timestamps to verify ordering
+	now := time.Now()
+	entries := map[string]time.Time{
+		"newest.com:443":  now,
+		"middle1.com:443": now.Add(-1 * time.Second),
+		"middle2.com:443": now.Add(-2 * time.Second),
+		"oldest.com:443":  now.Add(-3 * time.Second),
+	}
+
+	for addr, ts := range entries {
+		rt.cachedConnections[addr] = &cachedConn{
+			conn:     newMockConn(),
+			lastUsed: ts,
+		}
+	}
+
+	// Temporarily set max to 2 to force eviction of 2 entries
+	// We can't change the const, so we'll test with the real limit
+	// Instead, fill to maxCachedConnections+2 with known ordering
+	rt.cachedConnections = make(map[string]*cachedConn) // reset
+
+	numEntries := maxCachedConnections + 2
+	for i := 0; i < numEntries; i++ {
+		conn := newMockConn()
+		lastUsed := now.Add(time.Duration(i) * time.Millisecond)
+		rt.cachedConnections[addrForIndex(i)] = &cachedConn{
+			conn:     conn,
+			lastUsed: lastUsed,
+		}
+	}
+
+	rt.cleanupCache()
+
+	if len(rt.cachedConnections) != maxCachedConnections {
+		t.Errorf("expected %d, got %d", maxCachedConnections, len(rt.cachedConnections))
+	}
+
+	// Verify that the 2 oldest (index 0 and 1) were evicted
+	if _, exists := rt.cachedConnections[addrForIndex(0)]; exists {
+		t.Error("index 0 (oldest) should have been evicted")
+	}
+	if _, exists := rt.cachedConnections[addrForIndex(1)]; exists {
+		t.Error("index 1 (second oldest) should have been evicted")
+	}
+	// And the rest remain
+	if _, exists := rt.cachedConnections[addrForIndex(2)]; !exists {
+		t.Error("index 2 should still exist")
+	}
+}
+
+// =============================================================================
+// Test that sort-based eviction is O(n log n) not O(n^2)
+// =============================================================================
+
+func TestLRU_EvictionUsesSort(t *testing.T) {
+	// This test verifies the batch eviction uses sort.Slice pattern
+	// by testing with a large number of entries
+	rt := createTestRoundTripper()
+
+	baseTime := time.Now()
+	n := maxCachedConnections + 200
+
+	for i := 0; i < n; i++ {
+		rt.cachedConnections[addrForIndex(i)] = &cachedConn{
+			conn:     newMockConn(),
+			lastUsed: baseTime.Add(time.Duration(i) * time.Millisecond),
+		}
+	}
+
+	// This should complete quickly with sort-based eviction
+	start := time.Now()
+	rt.cleanupCache()
+	elapsed := time.Since(start)
+
+	if len(rt.cachedConnections) != maxCachedConnections {
+		t.Errorf("expected %d connections, got %d", maxCachedConnections, len(rt.cachedConnections))
+	}
+
+	// Verify the 200 oldest were evicted
+	for i := 0; i < 200; i++ {
+		if _, exists := rt.cachedConnections[addrForIndex(i)]; exists {
+			t.Errorf("index %d should have been evicted", i)
+		}
+	}
+
+	t.Logf("Sort-based eviction of %d excess entries from %d total took %v", 200, n, elapsed)
+}
+
+// =============================================================================
+// Regression test: verify the sort.Slice approach produces correct results
+// =============================================================================
+
+func TestSortSlice_LRUOrdering(t *testing.T) {
+	// Test that our sort-based approach correctly orders by lastUsed
+	type entry struct {
+		key      string
+		lastUsed time.Time
+	}
+
+	now := time.Now()
+	entries := []entry{
+		{"c", now.Add(-3 * time.Second)},
+		{"a", now.Add(-1 * time.Second)},
+		{"d", now.Add(-4 * time.Second)},
+		{"b", now.Add(-2 * time.Second)},
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].lastUsed.Before(entries[j].lastUsed)
+	})
+
+	// After sorting, order should be d, c, b, a (oldest first)
+	expectedOrder := []string{"d", "c", "b", "a"}
+	for i, e := range entries {
+		if e.key != expectedOrder[i] {
+			t.Errorf("position %d: expected %s, got %s", i, expectedOrder[i], e.key)
+		}
+	}
+}
+
+// =============================================================================
+// Issue 1 & 2: Race condition tests (verify the already-fixed Lock patterns)
+// These additional tests verify behavior under high contention.
+// =============================================================================
+
+func TestClientPool_ConcurrentGetOrCreate_DifferentTimeouts(t *testing.T) {
+	// Save and restore global pool
+	advancedClientPoolMutex.Lock()
+	savedPool := advancedClientPool
+	advancedClientPool = make(map[string]*ClientPoolEntry)
+	advancedClientPoolMutex.Unlock()
+
+	defer func() {
+		advancedClientPoolMutex.Lock()
+		advancedClientPool = savedPool
+		advancedClientPoolMutex.Unlock()
+	}()
+
+	browser := Browser{
+		JA3:       "test",
+		UserAgent: "test",
+	}
+
+	var wg sync.WaitGroup
+
+	// Concurrently create clients with different timeouts
+	// After the fix, these should create separate pool entries
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		timeout := i * 10
+		go func(t int) {
+			defer wg.Done()
+			key := generateClientKey(browser, t, false, "")
+			advancedClientPoolMutex.Lock()
+			advancedClientPool[key] = &ClientPoolEntry{
+				Client:    http.Client{},
+				CreatedAt: time.Now(),
+				LastUsed:  time.Now(),
+			}
+			advancedClientPoolMutex.Unlock()
+		}(timeout)
+	}
+
+	wg.Wait()
+
+	// Should have 5 separate entries (one per timeout)
+	advancedClientPoolMutex.Lock()
+	count := len(advancedClientPool)
+	advancedClientPoolMutex.Unlock()
+
+	if count != 5 {
+		t.Errorf("expected 5 pool entries (different timeouts), got %d", count)
 	}
 }

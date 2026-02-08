@@ -161,11 +161,12 @@ func browserFromOptions(opts Options) Browser {
 		UserAgent:          opts.UserAgent,
 		ServerName:         opts.ServerName,
 		Cookies:            opts.Cookies,
-		InsecureSkipVerify: opts.InsecureSkipVerify,
-		ForceHTTP1:         opts.ForceHTTP1,
-		ForceHTTP3:         opts.ForceHTTP3,
-		TLS13AutoRetry:     opts.TLS13AutoRetry,
-		HeaderOrder:        opts.HeaderOrder,
+		InsecureSkipVerify:      opts.InsecureSkipVerify,
+		ProxyInsecureSkipVerify: opts.ProxyInsecureSkipVerify,
+		ForceHTTP1:              opts.ForceHTTP1,
+		ForceHTTP3:              opts.ForceHTTP3,
+		TLS13AutoRetry:          opts.TLS13AutoRetry,
+		HeaderOrder:             opts.HeaderOrder,
 	}
 }
 
@@ -1786,16 +1787,17 @@ func (client CycleTLS) Do(URL string, options Options, Method string) (Response,
 
 	// Create browser from options
 	browser := Browser{
-		JA3:                options.Ja3,
-		JA4r:               options.Ja4r,
-		HTTP2Fingerprint:   options.HTTP2Fingerprint,
-		QUICFingerprint:    options.QUICFingerprint,
-		UserAgent:          options.UserAgent,
-		Cookies:            options.Cookies,
-		InsecureSkipVerify: options.InsecureSkipVerify,
-		ForceHTTP1:         options.ForceHTTP1,
-		ForceHTTP3:         options.ForceHTTP3,
-		HeaderOrder:        options.HeaderOrder,
+		JA3:                     options.Ja3,
+		JA4r:                    options.Ja4r,
+		HTTP2Fingerprint:        options.HTTP2Fingerprint,
+		QUICFingerprint:         options.QUICFingerprint,
+		UserAgent:               options.UserAgent,
+		Cookies:                 options.Cookies,
+		InsecureSkipVerify:      options.InsecureSkipVerify,
+		ProxyInsecureSkipVerify: options.ProxyInsecureSkipVerify,
+		ForceHTTP1:              options.ForceHTTP1,
+		ForceHTTP3:              options.ForceHTTP3,
+		HeaderOrder:             options.HeaderOrder,
 	}
 
 	// Note: Don't automatically set HeaderOrder from UserAgent here as it can interfere with connection management

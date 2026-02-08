@@ -14,6 +14,7 @@ import (
 	"golang.org/x/net/proxy"
 	"net"
 	stdhttp "net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -587,6 +588,9 @@ func (rt *roundTripper) CloseIdleConnections(selectedAddr ...string) {
 			}
 			delete(rt.cachedHTTP3Transports, key)
 		}
+		// Stop the cleanup goroutine since all connections are closed
+		// and there is nothing left to manage.
+		rt.StopCacheCleanup()
 	}
 }
 
@@ -644,58 +648,70 @@ func (rt *roundTripper) cleanupCache() {
 		}
 	}
 
-	// If still over limit, remove oldest connections
-	for len(rt.cachedConnections) > maxCachedConnections {
-		var oldestKey string
-		var oldestTime time.Time
-		for k, v := range rt.cachedConnections {
-			if oldestKey == "" || v.lastUsed.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = v.lastUsed
-			}
+	// Batch eviction: sort by lastUsed and remove excess in one pass (O(n log n))
+	// instead of scanning for the oldest entry each iteration (O(n^2)).
+	if excess := len(rt.cachedConnections) - maxCachedConnections; excess > 0 {
+		type connEntry struct {
+			key      string
+			lastUsed time.Time
 		}
-		if oldestKey != "" {
-			if cc := rt.cachedConnections[oldestKey]; cc != nil && cc.conn != nil {
+		entries := make([]connEntry, 0, len(rt.cachedConnections))
+		for k, v := range rt.cachedConnections {
+			entries = append(entries, connEntry{k, v.lastUsed})
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			return entries[i].lastUsed.Before(entries[j].lastUsed)
+		})
+		for i := 0; i < excess; i++ {
+			key := entries[i].key
+			if cc := rt.cachedConnections[key]; cc != nil && cc.conn != nil {
 				_ = cc.conn.Close()
 			}
-			delete(rt.cachedConnections, oldestKey)
+			delete(rt.cachedConnections, key)
 		}
 	}
 
-	// If still over limit, remove oldest transports
-	for len(rt.cachedTransports) > maxCachedTransports {
-		var oldestKey string
-		var oldestTime time.Time
+	// Batch eviction for transports
+	if excess := len(rt.cachedTransports) - maxCachedTransports; excess > 0 {
+		type transportEntry struct {
+			key      string
+			lastUsed time.Time
+		}
+		entries := make([]transportEntry, 0, len(rt.cachedTransports))
 		for k, v := range rt.cachedTransports {
-			if oldestKey == "" || v.lastUsed.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = v.lastUsed
-			}
+			entries = append(entries, transportEntry{k, v.lastUsed})
 		}
-		if oldestKey != "" {
-			delete(rt.cachedTransports, oldestKey)
+		sort.Slice(entries, func(i, j int) bool {
+			return entries[i].lastUsed.Before(entries[j].lastUsed)
+		})
+		for i := 0; i < excess; i++ {
+			delete(rt.cachedTransports, entries[i].key)
 		}
 	}
 
-	// If still over limit, remove oldest HTTP/3 transports
-	for len(rt.cachedHTTP3Transports) > maxCachedTransports {
-		var oldestKey string
-		var oldestTime time.Time
-		for k, v := range rt.cachedHTTP3Transports {
-			if oldestKey == "" || v.lastUsed.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = v.lastUsed
-			}
+	// Batch eviction for HTTP/3 transports
+	if excess := len(rt.cachedHTTP3Transports) - maxCachedTransports; excess > 0 {
+		type h3Entry struct {
+			key      string
+			lastUsed time.Time
 		}
-		if oldestKey != "" {
-			h3t := rt.cachedHTTP3Transports[oldestKey]
+		entries := make([]h3Entry, 0, len(rt.cachedHTTP3Transports))
+		for k, v := range rt.cachedHTTP3Transports {
+			entries = append(entries, h3Entry{k, v.lastUsed})
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			return entries[i].lastUsed.Before(entries[j].lastUsed)
+		})
+		for i := 0; i < excess; i++ {
+			key := entries[i].key
+			h3t := rt.cachedHTTP3Transports[key]
 			if h3t.transport != nil {
 				_ = h3t.transport.Close()
 			}
 			if h3t.conn != nil {
 				rt.closeHTTP3Connection(h3t.conn)
 			}
-			delete(rt.cachedHTTP3Transports, oldestKey)
+			delete(rt.cachedHTTP3Transports, key)
 		}
 	}
 }

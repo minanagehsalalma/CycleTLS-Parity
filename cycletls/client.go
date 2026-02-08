@@ -39,11 +39,12 @@ type Browser struct {
 	UserAgent string
 
 	// Connection options
-	ServerName         string
-	Cookies            []Cookie
-	InsecureSkipVerify bool
-	ForceHTTP1         bool
-	ForceHTTP3         bool
+	ServerName              string
+	Cookies                 []Cookie
+	InsecureSkipVerify      bool
+	ProxyInsecureSkipVerify *bool // TLS verification for proxy connections. nil=default (true for backward compat). Set to false to verify proxy certs.
+	ForceHTTP1              bool
+	ForceHTTP3              bool
 
 	// TLS 1.3 specific options
 	TLS13AutoRetry bool
@@ -152,7 +153,10 @@ func generateClientKey(browser Browser, timeout int, disableRedirect bool, proxy
 	}
 
 	// Create a hash of the configuration that affects connection behavior
-	configStr := fmt.Sprintf("ja3:%s|ja4r:%s|http2:%s|quic:%s|ua:%s|sni:%s|proxy:%s|redirect:%t|skipverify:%t|forcehttp1:%t|forcehttp3:%t%s",
+	// Note: timeout MUST be included because clients with different timeouts
+	// should not share the same pool entry (a 5s timeout client vs 60s timeout
+	// client have very different behavior characteristics).
+	configStr := fmt.Sprintf("ja3:%s|ja4r:%s|http2:%s|quic:%s|ua:%s|sni:%s|proxy:%s|timeout:%d|redirect:%t|skipverify:%t|forcehttp1:%t|forcehttp3:%t%s",
 		browser.JA3,
 		browser.JA4r,
 		browser.HTTP2Fingerprint,
@@ -160,6 +164,7 @@ func generateClientKey(browser Browser, timeout int, disableRedirect bool, proxy
 		browser.UserAgent,
 		browser.ServerName,
 		proxyURL,
+		timeout,
 		disableRedirect,
 		browser.InsecureSkipVerify,
 		browser.ForceHTTP1,
@@ -232,19 +237,14 @@ func createNewClient(browser Browser, timeout int, disableRedirect bool, userAge
 	var dialer proxy.ContextDialer
 	if len(proxyURL) > 0 && len(proxyURL[0]) > 0 {
 		var err error
-		// Backward compatibility: proxy TLS connections default to InsecureSkipVerify=true
-		// because proxies commonly use self-signed certificates. The user's
-		// InsecureSkipVerify setting applies to the proxy's own TLS handshake only
-		// (not the tunneled target connection). Previously this was always true;
-		// we preserve that default unless the user explicitly sets it to false
-		// through the Options struct AND the proxy uses HTTPS.
-		proxyInsecureSkipVerify := true
-		if browser.InsecureSkipVerify {
-			proxyInsecureSkipVerify = true // explicit true from user
+		// Proxy TLS verification is separate from target TLS verification.
+		// Default: InsecureSkipVerify=true for proxy connections (backward compat,
+		// since proxies commonly use self-signed certificates).
+		// Users can explicitly set ProxyInsecureSkipVerify=false to verify proxy certs.
+		proxyInsecureSkipVerify := true // default for backward compat
+		if browser.ProxyInsecureSkipVerify != nil {
+			proxyInsecureSkipVerify = *browser.ProxyInsecureSkipVerify
 		}
-		// Note: We cannot distinguish "user set false" from "user didn't set it"
-		// with a plain bool, so we default to true for backward compatibility.
-		// Users needing strict proxy cert verification should use a custom DialTLS.
 		dialer, err = newConnectDialer(proxyURL[0], userAgent, proxyInsecureSkipVerify)
 		if err != nil {
 			return fhttp.Client{

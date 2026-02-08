@@ -68,7 +68,8 @@ type Options struct {
 	DisableRedirect    bool     `json:"disableRedirect"`
 	HeaderOrder        []string `json:"headerOrder"`
 	OrderAsProvided    bool     `json:"orderAsProvided"` //TODO
-	InsecureSkipVerify bool     `json:"insecureSkipVerify"`
+	InsecureSkipVerify      bool  `json:"insecureSkipVerify"`
+	ProxyInsecureSkipVerify *bool `json:"proxyInsecureSkipVerify"` // TLS verification for proxy connections. Defaults to true for backward compat. Set to false to verify proxy certificates.
 
 	// Protocol options
 	ForceHTTP1 bool   `json:"forceHTTP1"`
