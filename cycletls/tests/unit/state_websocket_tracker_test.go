@@ -4,6 +4,7 @@ package unit
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Danny-Dasilva/CycleTLS/cycletls/state"
@@ -16,6 +17,8 @@ type mockWSConnection struct {
 }
 
 func TestRegisterAndGetWebSocket(t *testing.T) {
+	t.Parallel()
+
 	conn := &mockWSConnection{ID: "test-ws-1", Data: "test data"}
 	wsID := "ws-test-1"
 
@@ -44,6 +47,8 @@ func TestRegisterAndGetWebSocket(t *testing.T) {
 }
 
 func TestGetWebSocket_NotExists(t *testing.T) {
+	t.Parallel()
+
 	retrieved, exists := state.GetWebSocket("ws-non-existent-id")
 
 	if exists {
@@ -56,6 +61,8 @@ func TestGetWebSocket_NotExists(t *testing.T) {
 }
 
 func TestUnregisterWebSocket(t *testing.T) {
+	t.Parallel()
+
 	conn := &mockWSConnection{ID: "test-ws-2", Data: "data to remove"}
 	wsID := "ws-test-2"
 
@@ -77,11 +84,15 @@ func TestUnregisterWebSocket(t *testing.T) {
 }
 
 func TestUnregisterWebSocket_NonExistent(t *testing.T) {
+	t.Parallel()
+
 	// Should not panic when unregistering non-existent ID
 	state.UnregisterWebSocket("ws-does-not-exist")
 }
 
 func TestMultipleWebSocketConnections(t *testing.T) {
+	t.Parallel()
+
 	connections := make(map[string]*mockWSConnection)
 	for i := 0; i < 10; i++ {
 		id := "ws-multi-test-" + string(rune('a'+i))
@@ -130,6 +141,8 @@ func TestMultipleWebSocketConnections(t *testing.T) {
 }
 
 func TestWebSocketConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	const numGoroutines = 20
 	const numOperations = 10
 
@@ -163,6 +176,8 @@ func TestWebSocketConcurrentAccess(t *testing.T) {
 }
 
 func TestWebSocketConcurrentRegisterUnregister(t *testing.T) {
+	t.Parallel()
+
 	const numGoroutines = 10
 	const numOperations = 20
 
@@ -196,6 +211,8 @@ func TestWebSocketConcurrentRegisterUnregister(t *testing.T) {
 }
 
 func TestRegisterWebSocketOverwrite(t *testing.T) {
+	t.Parallel()
+
 	conn1 := &mockWSConnection{ID: "original", Data: "original data"}
 	conn2 := &mockWSConnection{ID: "replacement", Data: "replacement data"}
 	wsID := "ws-overwrite-test"
@@ -219,4 +236,121 @@ func TestRegisterWebSocketOverwrite(t *testing.T) {
 	if typedConn.Data != "replacement data" {
 		t.Fatal("RegisterOverwrite: second registration should overwrite with replacement data")
 	}
+}
+
+// Issue #12 (MAJOR): Thread-safe concurrent access on the SAME key
+func TestWebSocketConcurrentSameKey(t *testing.T) {
+	t.Parallel()
+
+	const numGoroutines = 50
+	const opsPerGoroutine = 100
+	wsID := "ws-same-key-concurrent"
+
+	var wg sync.WaitGroup
+	var panicked atomic.Int64
+
+	wg.Add(numGoroutines * 3)
+
+	// Registerers
+	for i := 0; i < numGoroutines; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					panicked.Add(1)
+				}
+			}()
+			for j := 0; j < opsPerGoroutine; j++ {
+				conn := &mockWSConnection{ID: wsID, Data: "data"}
+				state.RegisterWebSocket(wsID, conn)
+			}
+		}(i)
+	}
+
+	// Readers
+	for i := 0; i < numGoroutines; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					panicked.Add(1)
+				}
+			}()
+			for j := 0; j < opsPerGoroutine; j++ {
+				conn, exists := state.GetWebSocket(wsID)
+				if exists && conn != nil {
+					// Verify type assertion safety under concurrency
+					if _, ok := conn.(*mockWSConnection); !ok {
+						t.Errorf("Type assertion failed on concurrent read")
+					}
+				}
+			}
+		}(i)
+	}
+
+	// Unregisterers
+	for i := 0; i < numGoroutines; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					panicked.Add(1)
+				}
+			}()
+			for j := 0; j < opsPerGoroutine; j++ {
+				state.UnregisterWebSocket(wsID)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	if p := panicked.Load(); p > 0 {
+		t.Errorf("Concurrent same-key operations panicked %d times", p)
+	}
+}
+
+// Issue #12 (MAJOR): Register->Get->Unregister cycle under concurrent load
+func TestWebSocketConcurrentRegisterGetUnregisterCycle(t *testing.T) {
+	t.Parallel()
+
+	const numGoroutines = 30
+	const opsPerGoroutine = 50
+
+	var wg sync.WaitGroup
+	var panicked atomic.Int64
+	var getSuccesses atomic.Int64
+
+	wg.Add(numGoroutines)
+	for i := 0; i < numGoroutines; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					panicked.Add(1)
+				}
+			}()
+			for j := 0; j < opsPerGoroutine; j++ {
+				id := "ws-cycle-" + string(rune('a'+idx%26))
+				conn := &mockWSConnection{ID: id}
+
+				// Full lifecycle: register -> get -> unregister
+				state.RegisterWebSocket(id, conn)
+
+				retrieved, exists := state.GetWebSocket(id)
+				if exists && retrieved != nil {
+					getSuccesses.Add(1)
+				}
+
+				state.UnregisterWebSocket(id)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	if p := panicked.Load(); p > 0 {
+		t.Errorf("Concurrent register-get-unregister cycle panicked %d times", p)
+	}
+	t.Logf("Successful gets during concurrent cycles: %d", getSuccesses.Load())
 }

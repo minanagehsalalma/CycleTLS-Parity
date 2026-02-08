@@ -6,30 +6,41 @@ import (
 	"testing"
 )
 
-// TestUncheckedTypeAssertion_Panics demonstrates that an unchecked type assertion
-// panics when the interface holds an unexpected type. This is the bug that the
-// comma-ok pattern fixes.
+// Issue #4 (CRITICAL): Fixed panic test logic error.
+// Previously, t.Error("Should have panicked") at the end was unreachable because the panic
+// on the line above would always jump to the defer/recover. The test always passed vacuously.
+// Fix: Use a `panicked` boolean flag set inside defer/recover, and assert it after the
+// function that should panic returns.
 func TestUncheckedTypeAssertion_Panics(t *testing.T) {
+	t.Parallel()
+
 	// Simulate the state.GetWebSocket pattern: returns interface{}
 	var wsConnInterface interface{} = "not a WebSocketConnection"
 
-	// The old code did: wsConn := wsConnInterface.(*WebSocketConnection)
-	// which would panic. The fix uses comma-ok pattern.
-	defer func() {
-		if r := recover(); r != nil {
-			t.Logf("Unchecked type assertion panicked as expected: %v", r)
-		}
+	type FakeWSConn struct{ ID string }
+
+	panicked := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked = true
+				t.Logf("Unchecked type assertion panicked as expected: %v", r)
+			}
+		}()
+		// This simulates the bug - unchecked assertion on wrong type panics
+		_ = wsConnInterface.(*FakeWSConn)
 	}()
 
-	// This simulates the bug - unchecked assertion on wrong type panics
-	type FakeWSConn struct{ ID string }
-	_ = wsConnInterface.(*FakeWSConn) // This will panic
-	t.Error("Should have panicked on unchecked type assertion")
+	if !panicked {
+		t.Error("Expected unchecked type assertion to panic, but it did not")
+	}
 }
 
 // TestCheckedTypeAssertion_Safe demonstrates the fix: comma-ok pattern
 // gracefully handles wrong types without panicking.
 func TestCheckedTypeAssertion_Safe(t *testing.T) {
+	t.Parallel()
+
 	type FakeWSConn struct{ ID string }
 
 	// Case 1: wrong type
@@ -64,5 +75,47 @@ func TestCheckedTypeAssertion_Safe(t *testing.T) {
 	}
 	if conn != nil {
 		t.Error("Should return nil for nil interface")
+	}
+}
+
+// TestTypeAssertionOnNilPointer tests comma-ok with a typed nil pointer in interface.
+func TestTypeAssertionOnNilPointer(t *testing.T) {
+	t.Parallel()
+
+	type FakeWSConn struct{ ID string }
+
+	// A typed nil pointer IS a valid *FakeWSConn, so ok should be true
+	var nilConn *FakeWSConn
+	var wsConnInterface interface{} = nilConn
+
+	conn, ok := wsConnInterface.(*FakeWSConn)
+	if !ok {
+		t.Error("Typed nil pointer should pass type assertion (ok=true)")
+	}
+	if conn != nil {
+		t.Error("Typed nil pointer should yield nil conn value")
+	}
+}
+
+// TestTypeAssertionMultipleTypes tests comma-ok across several concrete types.
+func TestTypeAssertionMultipleTypes(t *testing.T) {
+	t.Parallel()
+
+	type ConnA struct{ Name string }
+	type ConnB struct{ Name string }
+
+	var iface interface{} = &ConnA{Name: "alpha"}
+
+	if _, ok := iface.(*ConnA); !ok {
+		t.Error("Should match *ConnA")
+	}
+	if _, ok := iface.(*ConnB); ok {
+		t.Error("Should NOT match *ConnB")
+	}
+	if _, ok := iface.(string); ok {
+		t.Error("Should NOT match string")
+	}
+	if _, ok := iface.(int); ok {
+		t.Error("Should NOT match int")
 	}
 }

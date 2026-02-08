@@ -5,6 +5,7 @@ package unit
 import (
 	"bytes"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -30,6 +31,8 @@ func putTestBuffer(buf *bytes.Buffer) {
 // This is the bug: b.Bytes() returns a slice backed by the buffer's internal array,
 // so if the buffer is reused before the slice is read, data gets overwritten.
 func TestBufferPool_DataCorruptionWithoutCopy(t *testing.T) {
+	t.Parallel()
+
 	const iterations = 1000
 	const goroutines = 10
 
@@ -94,6 +97,8 @@ func TestBufferPool_DataCorruptionWithoutCopy(t *testing.T) {
 // returned. This is a deterministic test that forces pool reuse by putting
 // a buffer back and immediately getting one.
 func TestBufferPool_ResetOnReuse(t *testing.T) {
+	t.Parallel()
+
 	// Get a buffer and write data to it
 	buf := getTestBuffer()
 	buf.WriteString("test data that should be cleared")
@@ -127,6 +132,8 @@ func TestBufferPool_ResetOnReuse(t *testing.T) {
 // before returning a buffer to the pool prevents corruption when the pool
 // reuses the same underlying buffer.
 func TestBufferPool_CopyBeforePutPreventsCorruption(t *testing.T) {
+	t.Parallel()
+
 	// Get a buffer, write data, and take a SAFE copy before returning to pool
 	buf := getTestBuffer()
 	buf.WriteString("important data")
@@ -153,6 +160,8 @@ func TestBufferPool_CopyBeforePutPreventsCorruption(t *testing.T) {
 // TestBufferPool_ConcurrentSafety verifies that the copy-before-put pattern
 // prevents data corruption under heavy concurrent load.
 func TestBufferPool_ConcurrentSafety(t *testing.T) {
+	t.Parallel()
+
 	const numProducers = 50
 	const messagesPerProducer = 100
 
@@ -205,5 +214,92 @@ func TestBufferPool_ConcurrentSafety(t *testing.T) {
 	}
 	if total != numProducers*messagesPerProducer {
 		t.Errorf("Expected %d messages, got %d", numProducers*messagesPerProducer, total)
+	}
+}
+
+// Issue #11 (MAJOR): Tests the write->return->get->verify pattern explicitly.
+// This pattern is the core of the buffer pool corruption scenario: if you write data,
+// return the buffer to the pool, then get a buffer back and verify, the original
+// data reference (without copy) would be corrupted.
+func TestBufferPool_WriteReturnGetVerify(t *testing.T) {
+	t.Parallel()
+
+	// Step 1: Write data to a buffer
+	buf1 := getTestBuffer()
+	originalData := "write-return-get-verify-test-data"
+	buf1.WriteString(originalData)
+
+	// Step 2: Take an UNSAFE reference (simulates the bug)
+	unsafeRef := buf1.Bytes()
+
+	// Step 3: Take a SAFE copy (simulates the fix)
+	safeRef := make([]byte, buf1.Len())
+	copy(safeRef, buf1.Bytes())
+
+	// Step 4: Return buffer to pool
+	putTestBuffer(buf1)
+
+	// Step 5: Get a new buffer from pool (likely the same one)
+	buf2 := getTestBuffer()
+	buf2.WriteString("OVERWRITE-CORRUPTION-DATA-LONG-ENOUGH")
+
+	// Step 6: Verify
+	// Safe reference must still be correct
+	if string(safeRef) != originalData {
+		t.Errorf("Safe copy corrupted: got %q, expected %q", string(safeRef), originalData)
+	}
+
+	// Unsafe reference MAY be corrupted (depends on pool reuse).
+	// We don't assert on unsafeRef's content because sync.Pool behavior is
+	// non-deterministic - but we verify the safe copy is always correct.
+	_ = unsafeRef // acknowledged: may be stale
+
+	putTestBuffer(buf2)
+}
+
+// Issue #11 (MAJOR): Concurrent write->return->get->verify under load
+func TestBufferPool_WriteReturnGetVerifyConcurrent(t *testing.T) {
+	t.Parallel()
+
+	const numGoroutines = 50
+	const opsPerGoroutine = 100
+
+	var wg sync.WaitGroup
+	var corruptions atomic.Int64
+	wg.Add(numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < opsPerGoroutine; j++ {
+				// Write
+				b := getTestBuffer()
+				expected := byte(id ^ j)
+				for k := 0; k < 64; k++ {
+					b.WriteByte(expected)
+				}
+
+				// Safe copy
+				data := make([]byte, b.Len())
+				copy(data, b.Bytes())
+
+				// Return to pool
+				putTestBuffer(b)
+
+				// Verify safe copy is intact
+				for k := 0; k < len(data); k++ {
+					if data[k] != expected {
+						corruptions.Add(1)
+						break
+					}
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	if c := corruptions.Load(); c > 0 {
+		t.Errorf("safe copies were corrupted %d times", c)
 	}
 }

@@ -15,6 +15,8 @@ import (
 // Internal state verification is done through observable behavior.
 
 func TestRegisterAndCancelRequest(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	requestID := "test-register-cancel-1"
 
@@ -37,6 +39,8 @@ func TestRegisterAndCancelRequest(t *testing.T) {
 }
 
 func TestCancelRequestNotExists(t *testing.T) {
+	t.Parallel()
+
 	result := state.CancelRequest("non-existent-request-id")
 
 	if result {
@@ -45,6 +49,8 @@ func TestCancelRequestNotExists(t *testing.T) {
 }
 
 func TestUnregisterRequest(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	requestID := "test-unregister-1"
@@ -71,11 +77,15 @@ func TestUnregisterRequest(t *testing.T) {
 }
 
 func TestUnregisterNonExistentRequest(t *testing.T) {
+	t.Parallel()
+
 	// Should not panic when unregistering a non-existent request
 	state.UnregisterRequest("non-existent-unregister-id")
 }
 
 func TestMultipleRequests(t *testing.T) {
+	t.Parallel()
+
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	ctx3, cancel3 := context.WithCancel(context.Background())
@@ -121,6 +131,8 @@ func TestMultipleRequests(t *testing.T) {
 }
 
 func TestRequestTrackerConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	const numGoroutines = 100
 	var wg sync.WaitGroup
 	wg.Add(numGoroutines * 3)
@@ -157,6 +169,8 @@ func TestRequestTrackerConcurrentAccess(t *testing.T) {
 }
 
 func TestDoubleRegistration(t *testing.T) {
+	t.Parallel()
+
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel1()
@@ -195,6 +209,8 @@ func TestDoubleRegistration(t *testing.T) {
 }
 
 func TestRegisterUnregisterCycle(t *testing.T) {
+	t.Parallel()
+
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel1()
@@ -228,5 +244,111 @@ func TestRegisterUnregisterCycle(t *testing.T) {
 		t.Error("First context should not be cancelled")
 	default:
 		// Expected
+	}
+}
+
+// Issue #12 (MAJOR): Thread-safe concurrent access patterns.
+// Tests rapid register-cancel-unregister cycles on the SAME key from multiple goroutines.
+func TestRequestTrackerConcurrentSameKey(t *testing.T) {
+	t.Parallel()
+
+	const numGoroutines = 50
+	const opsPerGoroutine = 100
+	requestID := "same-key-concurrent"
+
+	var wg sync.WaitGroup
+	var panicked atomic.Int64
+
+	wg.Add(numGoroutines)
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					panicked.Add(1)
+				}
+			}()
+			for j := 0; j < opsPerGoroutine; j++ {
+				_, cancel := context.WithCancel(context.Background())
+				state.RegisterRequest(requestID, cancel)
+				state.CancelRequest(requestID)
+				state.UnregisterRequest(requestID)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	if p := panicked.Load(); p > 0 {
+		t.Errorf("Concurrent same-key operations panicked %d times", p)
+	}
+}
+
+// Issue #12 (MAJOR): Interleaved register+cancel vs unregister on overlapping keys.
+func TestRequestTrackerInterleavedOperations(t *testing.T) {
+	t.Parallel()
+
+	const numKeys = 20
+	const numGoroutines = 10
+	const opsPerGoroutine = 50
+
+	var wg sync.WaitGroup
+	var panicked atomic.Int64
+
+	wg.Add(numGoroutines * 3)
+
+	// Registerers
+	for i := 0; i < numGoroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					panicked.Add(1)
+				}
+			}()
+			for j := 0; j < opsPerGoroutine; j++ {
+				key := "interleaved-" + string(rune('0'+j%numKeys))
+				_, cancel := context.WithCancel(context.Background())
+				state.RegisterRequest(key, cancel)
+			}
+		}(i)
+	}
+
+	// Cancellers
+	for i := 0; i < numGoroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					panicked.Add(1)
+				}
+			}()
+			for j := 0; j < opsPerGoroutine; j++ {
+				key := "interleaved-" + string(rune('0'+j%numKeys))
+				state.CancelRequest(key)
+			}
+		}(i)
+	}
+
+	// Unregisterers
+	for i := 0; i < numGoroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					panicked.Add(1)
+				}
+			}()
+			for j := 0; j < opsPerGoroutine; j++ {
+				key := "interleaved-" + string(rune('0'+j%numKeys))
+				state.UnregisterRequest(key)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	if p := panicked.Load(); p > 0 {
+		t.Errorf("Interleaved operations panicked %d times", p)
 	}
 }
