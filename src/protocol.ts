@@ -12,10 +12,11 @@ class BufferWriter {
   private parts: Buffer[] = [];
 
   writeString(s: string): void {
+    const strBuf = Buffer.from(s, "utf8");
     const len = Buffer.alloc(2);
-    len.writeUInt16BE(s.length, 0);
+    len.writeUInt16BE(strBuf.length, 0);
     this.parts.push(len);
-    this.parts.push(Buffer.from(s, "utf8"));
+    this.parts.push(strBuf);
   }
 
   writeU32(v: number): void {
@@ -64,13 +65,34 @@ export class BufferReader {
 
   constructor(private data: Buffer) {}
 
+  readU8(): number {
+    if (this.offset + 1 > this.data.length) {
+      throw new Error(
+        `Buffer underflow: need 1 byte at offset ${this.offset}, but only ${this.data.length - this.offset} remaining`
+      );
+    }
+    const v = this.data.readUInt8(this.offset);
+    this.offset += 1;
+    return v;
+  }
+
   readU16(): number {
+    if (this.offset + 2 > this.data.length) {
+      throw new Error(
+        `Buffer underflow: need 2 bytes at offset ${this.offset}, but only ${this.data.length - this.offset} remaining`
+      );
+    }
     const v = this.data.readUInt16BE(this.offset);
     this.offset += 2;
     return v;
   }
 
   readU32(): number {
+    if (this.offset + 4 > this.data.length) {
+      throw new Error(
+        `Buffer underflow: need 4 bytes at offset ${this.offset}, but only ${this.data.length - this.offset} remaining`
+      );
+    }
     const v = this.data.readUInt32BE(this.offset);
     this.offset += 4;
     return v;
@@ -102,7 +124,18 @@ export interface ParsedFrame {
   payload: Buffer;
 }
 
+/**
+ * Minimum frame size: 2 bytes (requestId length prefix) + 2 bytes (method length prefix) = 4 bytes.
+ * An empty requestId and empty method still require 4 bytes for their length prefixes.
+ */
+const MIN_FRAME_HEADER_SIZE = 4;
+
 export function parseFrame(data: Buffer): ParsedFrame {
+  if (data.length < MIN_FRAME_HEADER_SIZE) {
+    throw new Error(
+      `Invalid frame: buffer length ${data.length} is less than minimum header size ${MIN_FRAME_HEADER_SIZE}`
+    );
+  }
   const r = new BufferReader(data);
   const requestId = r.readString();
   const method = r.readString();
@@ -215,12 +248,25 @@ export interface WebSocketMessagePayload {
   data: Buffer;
 }
 
+/** Known WebSocket message types: 1 = text, 2 = binary */
+const KNOWN_WS_MESSAGE_TYPES = new Set([1, 2]);
+
 /**
  * Parse a "ws_message" frame payload.
  * Format: messageType (1 byte) + length (4 bytes) + data
  */
 export function parseWebSocketMessagePayload(payload: Buffer): WebSocketMessagePayload {
+  if (payload.length < 5) {
+    throw new Error(
+      `Invalid ws_message frame: payload length ${payload.length} is less than minimum 5 bytes`
+    );
+  }
   const messageType = payload.readUInt8(0);
+  if (!KNOWN_WS_MESSAGE_TYPES.has(messageType)) {
+    throw new Error(
+      `Invalid ws_message frame: unknown messageType ${messageType} (expected 1=text or 2=binary)`
+    );
+  }
   const length = payload.readUInt32BE(1);
   if (5 + length > payload.length) {
     throw new Error(

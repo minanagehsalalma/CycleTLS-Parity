@@ -116,6 +116,13 @@ export interface RequestOptions {
   tls13AutoRetry?: boolean;
   /** Enable connection reuse for subsequent requests (default: true) */
   enableConnectionReuse?: boolean;
+  /**
+   * SSE stream timeout in milliseconds. If no data is received within this
+   * period, the SSE connection is closed. Prevents hanging indefinitely
+   * if the server stops sending events without closing the connection.
+   * If not specified, no SSE stream timeout is applied.
+   */
+  sseTimeout?: number;
 }
 
 /**
@@ -197,19 +204,40 @@ export class CycleTLSError extends Error {
 /**
  * Creates a lazy buffer getter that caches the body stream contents.
  * Used by convenience methods (json, text, buffer, etc.) to avoid re-reading the stream.
+ *
+ * Protects against double-read: if the stream has already been consumed externally
+ * (e.g., via `for await (const chunk of body)`), subsequent calls throw immediately
+ * instead of hanging forever waiting for data that will never arrive.
  */
 function createBufferGetter(bodyStream: Readable): () => Promise<Buffer> {
   let cachedBuffer: Buffer | null = null;
+  let consuming = false;
   return async (): Promise<Buffer> => {
     if (cachedBuffer !== null) {
       return cachedBuffer;
     }
-    const chunks: Buffer[] = [];
-    for await (const chunk of bodyStream) {
-      chunks.push(chunk as Buffer);
+    if (consuming) {
+      throw new Error(
+        "Response body is already being consumed. Cannot read body twice concurrently."
+      );
     }
-    cachedBuffer = Buffer.concat(chunks);
-    return cachedBuffer;
+    if (bodyStream.destroyed || bodyStream.readableEnded) {
+      throw new Error(
+        "Response body has already been consumed. Use json(), text(), or buffer() before " +
+        "reading the body stream directly, or read the stream only once."
+      );
+    }
+    consuming = true;
+    try {
+      const chunks: Buffer[] = [];
+      for await (const chunk of bodyStream) {
+        chunks.push(chunk as Buffer);
+      }
+      cachedBuffer = Buffer.concat(chunks);
+      return cachedBuffer;
+    } finally {
+      consuming = false;
+    }
   };
 }
 
@@ -331,20 +359,39 @@ export class CycleTLSWebSocketV2 extends EventEmitter {
 
   /**
    * Close the WebSocket connection.
+   * Sends a close frame and waits for server acknowledgment with a timeout fallback.
    * @param code - Close status code (default: 1000)
    * @param reason - Close reason string
+   * @param closeTimeout - Timeout in ms to wait for server close acknowledgment (default: 5000)
    */
-  close(code: number = 1000, reason: string = ""): void {
+  close(code: number = 1000, reason: string = "", closeTimeout: number = 5000): void {
     if (this._readyState === WS_CLOSING || this._readyState === WS_CLOSED) {
       return;
     }
 
     this._readyState = WS_CLOSING;
 
+    // Set a timeout fallback: if server doesn't acknowledge the close in time,
+    // force-close the connection to prevent hanging
+    const closeTimer = setTimeout(() => {
+      if (this._readyState !== WS_CLOSED) {
+        this._readyState = WS_CLOSED;
+        this.wsConnection.close();
+        this.emit("close", code, reason);
+      }
+    }, closeTimeout);
+
+    // Clear the timer if we receive a proper close acknowledgment
+    this.once("close", () => {
+      clearTimeout(closeTimer);
+    });
+
     try {
       const packet = buildWebSocketClosePacket(this.requestId, code, reason);
       this.wsConnection.send(packet);
     } catch (err) {
+      clearTimeout(closeTimer);
+      this._readyState = WS_CLOSED;
       this.emit("error", err);
     }
   }
@@ -498,7 +545,15 @@ export class CycleTLS extends EventEmitter {
     this.executablePath = options.executablePath;
     this.autoSpawn = options.autoSpawn ?? true;
     this.initialWindow = options.initialWindow ?? 65536;
-    this.creditThreshold = options.creditThreshold ?? this.initialWindow / 2;
+    const rawThreshold = options.creditThreshold ?? this.initialWindow / 2;
+    // Validate: creditThreshold must be less than initialWindow to prevent deadlock
+    // where credits are never issued because the threshold can never be reached.
+    // Also enforce a minimum floor of 1 byte to prevent zero-threshold edge cases.
+    if (rawThreshold >= this.initialWindow) {
+      this.creditThreshold = Math.max(1, Math.floor(this.initialWindow / 2));
+    } else {
+      this.creditThreshold = Math.max(1, rawThreshold);
+    }
   }
 
   /**
@@ -675,20 +730,42 @@ export class CycleTLS extends EventEmitter {
       // Read timeout handling:
       // - If readTimeout is specified, start a new timer after headers arrive
       // - This prevents streams from hanging indefinitely if server stalls mid-body
+      // - Also starts an absolute deadline timer that fires even if the stream is
+      //   never consumed (unconsumed streams would otherwise hold resources forever)
       let readTimeoutId: ReturnType<typeof setTimeout> | null = null;
+      let absoluteDeadlineId: ReturnType<typeof setTimeout> | null = null;
       const clearReadTimeout = (): void => {
         if (readTimeoutId !== null) {
           clearTimeout(readTimeoutId);
           readTimeoutId = null;
         }
+        if (absoluteDeadlineId !== null) {
+          clearTimeout(absoluteDeadlineId);
+          absoluteDeadlineId = null;
+        }
       };
       const resetReadTimeout = (): void => {
-        clearReadTimeout();
+        // Clear the per-chunk idle timer (but not the absolute deadline)
+        if (readTimeoutId !== null) {
+          clearTimeout(readTimeoutId);
+          readTimeoutId = null;
+        }
         if (options.readTimeout !== undefined && options.readTimeout > 0) {
           readTimeoutId = setTimeout(() => {
+            clearReadTimeout();
             ws.close();
             bodyStream.destroy(new CycleTLSError("Read timeout", 408, requestId));
           }, options.readTimeout);
+          // Start an absolute deadline on first call (response receipt).
+          // This ensures cleanup even if the stream is never consumed.
+          // Uses 3x the readTimeout as the absolute max lifetime.
+          if (absoluteDeadlineId === null) {
+            absoluteDeadlineId = setTimeout(() => {
+              clearReadTimeout();
+              ws.close();
+              bodyStream.destroy(new CycleTLSError("Read timeout: stream not consumed", 408, requestId));
+            }, options.readTimeout * 3);
+          }
         }
       };
 
@@ -1278,7 +1355,29 @@ export class CycleTLS extends EventEmitter {
         }
       };
 
+      // SSE stream timeout: if configured, close the connection if no data
+      // is received within the timeout period. Resets on each data chunk.
+      let sseTimeoutId: ReturnType<typeof setTimeout> | null = null;
+      const clearSseTimeout = (): void => {
+        if (sseTimeoutId !== null) {
+          clearTimeout(sseTimeoutId);
+          sseTimeoutId = null;
+        }
+      };
+      const resetSseTimeout = (): void => {
+        clearSseTimeout();
+        if (options.sseTimeout !== undefined && options.sseTimeout > 0) {
+          sseTimeoutId = setTimeout(() => {
+            eventEmitter.emit("error", new Error("SSE stream timeout: no data received"));
+            bodyStream.destroy(new Error("SSE stream timeout"));
+            ws.close();
+          }, options.sseTimeout);
+        }
+      };
+
       bodyStream.on("data", (chunk: Buffer) => {
+        // Reset SSE stream timeout on each data chunk
+        resetSseTimeout();
         buffer += chunk.toString("utf8");
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
@@ -1288,6 +1387,7 @@ export class CycleTLS extends EventEmitter {
       });
 
       bodyStream.on("end", () => {
+        clearSseTimeout();
         // Process any remaining buffer
         if (buffer) {
           parseSSELine(buffer);
@@ -1414,6 +1514,7 @@ export class CycleTLS extends EventEmitter {
                   const events: SSEEvent[] = [];
                   let resolveWait: (() => void) | null = null;
                   let ended = false;
+                  let iteratorError: Error | null = null;
 
                   eventEmitter.on("event", (event: SSEEvent) => {
                     events.push(event);
@@ -1436,16 +1537,43 @@ export class CycleTLS extends EventEmitter {
                     }
                   });
 
-                  while (true) {
-                    if (events.length > 0) {
-                      yield events.shift()!;
-                    } else if (ended) {
-                      break;
-                    } else {
-                      await new Promise<void>((r) => {
-                        resolveWait = r;
-                      });
+                  // Handle errors (e.g., WebSocket drop without 'end' event)
+                  // so the async iterator doesn't hang forever
+                  eventEmitter.on("error", (err: Error) => {
+                    iteratorError = err;
+                    ended = true;
+                    if (resolveWait) {
+                      resolveWait();
+                      resolveWait = null;
                     }
+                  });
+
+                  // Handle body stream close/error to unblock iterator
+                  const onStreamClose = (): void => {
+                    ended = true;
+                    if (resolveWait) {
+                      resolveWait();
+                      resolveWait = null;
+                    }
+                  };
+                  bodyStream.once("close", onStreamClose);
+
+                  try {
+                    while (true) {
+                      if (events.length > 0) {
+                        yield events.shift()!;
+                      } else if (iteratorError) {
+                        throw iteratorError;
+                      } else if (ended) {
+                        break;
+                      } else {
+                        await new Promise<void>((r) => {
+                          resolveWait = r;
+                        });
+                      }
+                    }
+                  } finally {
+                    bodyStream.removeListener("close", onStreamClose);
                   }
                 },
 
@@ -1458,8 +1586,11 @@ export class CycleTLS extends EventEmitter {
                 },
 
                 async close(): Promise<void> {
+                  clearSseTimeout();
                   ws.close();
                   bodyStream.destroy();
+                  // Remove all SSE event listeners to prevent memory leaks
+                  eventEmitter.removeAllListeners();
                 },
               };
 

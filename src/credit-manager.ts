@@ -22,6 +22,9 @@ export class CreditManager {
    * @param sendCredits - Callback to send credits to the server
    */
   constructor(threshold: number, sendCredits: (credits: number) => void) {
+    if (threshold <= 0) {
+      throw new Error(`CreditManager threshold must be positive, got ${threshold}`);
+    }
     this.threshold = threshold;
     this.sendCredits = sendCredits;
   }
