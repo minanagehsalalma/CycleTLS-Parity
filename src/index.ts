@@ -9,6 +9,42 @@ import { Readable } from 'stream';
 import { Blob } from 'buffer';
 
 /**
+ * Forcefully kill a child process, using platform-appropriate methods.
+ * On Windows, uses taskkill since SIGKILL is not supported.
+ * On Unix, kills the process group (negative PID) for detached processes.
+ */
+function forceKillProcess(
+  child: ChildProcessWithoutNullStreams,
+  killGroup: boolean = false
+): void {
+  if (process.platform === "win32") {
+    // Windows: SIGKILL is not supported. Use taskkill for forceful termination
+    if (child.pid !== undefined) {
+      try {
+        spawn("taskkill", ["/pid", String(child.pid), "/f", "/t"]);
+      } catch {
+        // Fallback: direct kill (Node translates to TerminateProcess on Windows)
+        try { child.kill(); } catch { /* Process already dead */ }
+      }
+    } else {
+      try { child.kill(); } catch { /* Process already dead */ }
+    }
+  } else {
+    if (killGroup && child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+          console.error("Error killing process group:", error);
+        }
+      }
+    } else {
+      try { child.kill("SIGKILL"); } catch { /* Process already dead */ }
+    }
+  }
+}
+
+/**
  * HTTP headers type - maps header names to string or string array values.
  * Some headers like Set-Cookie may have multiple values.
  */
@@ -491,24 +527,8 @@ class SharedInstance extends EventEmitter {
     this.failedInitialization = true;
 
     // Kill child process if it exists to prevent zombie processes
-    if (this.child && this.child.pid !== undefined) {
-      try {
-        if (process.platform === "win32") {
-          this.child.kill('SIGKILL');
-        } else {
-          process.kill(-this.child.pid, 'SIGKILL');
-        }
-      } catch (e) {
-        // Process already dead - ignore
-      }
-      this.child = null;
-    } else if (this.child) {
-      // pid is undefined (process failed to spawn properly), try direct kill
-      try {
-        this.child.kill('SIGKILL');
-      } catch (e) {
-        // Process already dead - ignore
-      }
+    if (this.child) {
+      forceKillProcess(this.child, true);
       this.child = null;
     }
 
@@ -893,28 +913,7 @@ class SharedInstance extends EventEmitter {
     this.isShuttingDown = true;
 
     if (this.child) {
-      if (process.platform === "win32") {
-        try {
-          this.child.kill('SIGKILL');
-        } catch (error) {
-          console.error("Error killing Windows process:", error);
-        }
-      } else if (this.child.pid !== undefined) {
-        try {
-          process.kill(-this.child.pid, 'SIGKILL');
-        } catch (error) {
-          if ((error as any).code !== "ESRCH") {
-            console.error("Error killing process:", error);
-          }
-        }
-      } else {
-        // pid is undefined (process failed to spawn), fall back to direct kill
-        try {
-          this.child.kill('SIGKILL');
-        } catch (error) {
-          // Process already dead - ignore
-        }
-      }
+      forceKillProcess(this.child, true);
     }
   }
 
@@ -938,28 +937,7 @@ class SharedInstance extends EventEmitter {
 
     // Kill child process forcefully
     if (this.isHost && this.child) {
-      if (process.platform === "win32") {
-        try {
-          this.child.kill('SIGKILL');
-        } catch (error) {
-          console.error("Error killing Windows process:", error);
-        }
-      } else if (this.child.pid !== undefined) {
-        try {
-          process.kill(-this.child.pid, 'SIGKILL');
-        } catch (error) {
-          if ((error as any).code !== "ESRCH") {
-            console.error("Error killing process:", error);
-          }
-        }
-      } else {
-        // pid is undefined (process failed to spawn), fall back to direct kill
-        try {
-          this.child.kill('SIGKILL');
-        } catch (error) {
-          // Process already dead - ignore
-        }
-      }
+      forceKillProcess(this.child, true);
       this.child = null;
     }
 

@@ -290,7 +290,9 @@ export class CycleTLSWebSocketV2 extends EventEmitter {
   /**
    * Send data through the WebSocket.
    * @param data - String or Buffer to send
-   * @param callback - Optional callback called when send completes
+   * @param callback - Optional callback called when the data has been buffered
+   *   by the underlying WebSocket. Note: the callback fires after the data is
+   *   queued for transmission, not after the remote end acknowledges receipt.
    */
   send(data: string | Buffer, callback?: (err?: Error) => void): void {
     if (this._readyState !== WS_OPEN) {
@@ -308,8 +310,15 @@ export class CycleTLSWebSocketV2 extends EventEmitter {
       const isBinary = Buffer.isBuffer(data);
       const buf = isBinary ? data : Buffer.from(data, "utf8");
       const packet = buildWebSocketSendPacket(this.requestId, buf, isBinary);
-      this.wsConnection.send(packet);
-      if (callback) callback();
+      // Use the underlying ws.send callback so the caller is notified
+      // after the data has been flushed to the kernel buffer, not synchronously
+      this.wsConnection.send(packet, (err?: Error) => {
+        if (callback) {
+          callback(err);
+        } else if (err) {
+          this.emit("error", err);
+        }
+      });
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       if (callback) {
@@ -593,6 +602,15 @@ export class CycleTLS extends EventEmitter {
 
     this.serverProcess = spawn(execPath, [], spawnOptions);
 
+    // Attach error handler immediately to catch spawn failures (e.g., ENOENT)
+    // Without this, a failed spawn emits an uncaught 'error' event that crashes Node.js
+    this.serverProcess.on('error', (err) => {
+      if (this.debug) {
+        console.error(`[CycleTLS] Server process error: ${err.message}`);
+      }
+      this.serverProcess = null;
+    });
+
     // Wait for server to be ready
     for (let i = 0; i < 50; i++) {
       try {
@@ -623,9 +641,10 @@ export class CycleTLS extends EventEmitter {
         read() {},
       });
 
-      // Attach an error handler to prevent unhandled error events
+      // Attach a one-time error handler to prevent unhandled error events
       // The actual error is handled by rejecting the promise
-      bodyStream.on("error", () => {
+      // Using once() instead of on() to avoid leaking listeners on every request
+      bodyStream.once("error", () => {
         // Error is already handled by promise rejection, this just prevents
         // Node.js from emitting an unhandled error event
       });
@@ -647,6 +666,7 @@ export class CycleTLS extends EventEmitter {
       const effectiveTimeout = options.timeout ?? this.timeout;
       let timeoutId: ReturnType<typeof setTimeout> | null = setTimeout(() => {
         if (!resolved) {
+          clearReadTimeout(); // Ensure read timeout is also cleared
           ws.close();
           reject(new CycleTLSError("Request timeout", 408, requestId));
         }
@@ -1066,14 +1086,15 @@ export class CycleTLS extends EventEmitter {
               // Store the open info but don't emit yet
               const protocol = wsOpen.protocol ?? "";
               const extensions = wsOpen.extensions ?? "";
-              // Resolve the promise first, then emit 'open' after a short delay
-              // This ensures event handlers can be registered before the event fires
-              // We use setTimeout(0) because it goes to the macrotask queue,
-              // which runs AFTER all microtasks (like promise .then callbacks)
+              // Resolve the promise first, then emit 'open' via microtask
+              // This ensures event handlers registered in .then() callbacks
+              // receive the open event. queueMicrotask runs after the current
+              // microtask (resolve) but before any macrotasks, guaranteeing
+              // .then() handlers are attached before _handleOpen fires.
               resolve(cycleTLSWs);
-              setTimeout(() => {
+              queueMicrotask(() => {
                 cycleTLSWs._handleOpen(protocol, extensions);
-              }, 0);
+              });
               break;
             }
 
@@ -1184,9 +1205,10 @@ export class CycleTLS extends EventEmitter {
         read() {},
       });
 
-      // Attach an error handler to prevent unhandled error events
+      // Attach a one-time error handler to prevent unhandled error events
       // The actual error is handled by rejecting the promise
-      bodyStream.on("error", () => {
+      // Using once() instead of on() to avoid leaking listeners on every request
+      bodyStream.once("error", () => {
         // Error is already handled by promise rejection, this just prevents
         // Node.js from emitting an unhandled error event
       });
@@ -1388,12 +1410,18 @@ export class CycleTLS extends EventEmitter {
                 },
 
                 async *events(): AsyncIterableIterator<SSEEvent> {
+                  const MAX_SSE_QUEUE_SIZE = 10000;
                   const events: SSEEvent[] = [];
                   let resolveWait: (() => void) | null = null;
                   let ended = false;
 
                   eventEmitter.on("event", (event: SSEEvent) => {
                     events.push(event);
+                    // Prevent unbounded queue growth: drop oldest events if limit exceeded
+                    // This protects against fast server + slow consumer = memory exhaustion
+                    while (events.length > MAX_SSE_QUEUE_SIZE) {
+                      events.shift();
+                    }
                     if (resolveWait) {
                       resolveWait();
                       resolveWait = null;
@@ -1513,8 +1541,18 @@ export class CycleTLS extends EventEmitter {
   async close(): Promise<void> {
     if (this.serverProcess && this.serverProcess.pid) {
       if (process.platform === "win32") {
-        // Windows: just kill the process
-        this.serverProcess.kill("SIGKILL");
+        // Windows: SIGKILL is not supported. Use taskkill for forceful termination
+        // /f = force, /t = kill child processes, /pid = target process ID
+        try {
+          spawn("taskkill", ["/pid", String(this.serverProcess.pid), "/f", "/t"]);
+        } catch {
+          // Fallback: try direct kill (Node translates to TerminateProcess on Windows)
+          try {
+            this.serverProcess.kill();
+          } catch {
+            // Process already dead
+          }
+        }
       } else {
         // Unix: kill the process group (negative PID) since it was spawned with detached: true
         try {

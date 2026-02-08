@@ -40,8 +40,14 @@ export class CreditManager {
     this.bytesReceived += bytes;
 
     if (this.bytesReceived >= this.threshold) {
-      this.sendCredits(this.bytesReceived);
-      this.bytesReceived = 0;
+      const toSend = this.bytesReceived;
+      this.bytesReceived = 0; // Reset before send to avoid accounting mismatch if send throws
+      try {
+        this.sendCredits(toSend);
+      } catch {
+        // sendCredits failure should not crash the client;
+        // bytesReceived is already reset to prevent double-counting
+      }
     }
   }
 
@@ -58,8 +64,13 @@ export class CreditManager {
   resume(): void {
     this.paused = false;
     if (this.bytesReceived >= this.threshold) {
-      this.sendCredits(this.bytesReceived);
-      this.bytesReceived = 0;
+      const toSend = this.bytesReceived;
+      this.bytesReceived = 0; // Reset before send to avoid accounting mismatch if send throws
+      try {
+        this.sendCredits(toSend);
+      } catch {
+        // sendCredits failure should not crash the client
+      }
     }
   }
 
@@ -68,8 +79,14 @@ export class CreditManager {
    */
   flush(): void {
     if (!this.paused && this.bytesReceived > 0) {
-      this.sendCredits(this.bytesReceived);
-      this.bytesReceived = 0;
+      const toSend = this.bytesReceived;
+      this.bytesReceived = 0; // Reset before send to avoid accounting mismatch if send throws
+      try {
+        this.sendCredits(toSend);
+      } catch {
+        // sendCredits failure should not crash the client;
+        // bytesReceived is already reset to prevent double-counting
+      }
     }
   }
 
