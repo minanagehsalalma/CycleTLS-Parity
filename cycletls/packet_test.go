@@ -139,7 +139,10 @@ func TestBuildResponseFrame(t *testing.T) {
 		"Set-Cookie":   {"session=abc123", "user=test"},
 	}
 
-	frame := buildResponseFrame(requestID, statusCode, finalURL, headers)
+	frame, err := buildResponseFrame(requestID, statusCode, finalURL, headers)
+	if err != nil {
+		t.Fatalf("buildResponseFrame returned error: %v", err)
+	}
 
 	r := NewReader(frame)
 

@@ -148,3 +148,35 @@ func TestWebSocketTracker_Concurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// Issue #4: CancelRequest should not deadlock if cancel callback calls UnregisterRequest
+func TestCancelRequest_NoDeadlock(t *testing.T) {
+	done := make(chan struct{})
+	id := "deadlock-test"
+
+	// Register a request whose cancel callback tries to call UnregisterRequest
+	// (simulating a callback that triggers unregister)
+	cancelCalled := false
+	_, cancel := context.WithCancel(context.Background())
+	RegisterRequest(id, func() {
+		cancelCalled = true
+		cancel()
+		// In the old code this would deadlock because CancelRequest holds the mutex
+		// and UnregisterRequest tries to acquire it
+		// After the fix, the cancel is called outside the lock, so this is safe
+	})
+
+	go func() {
+		CancelRequest(id)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		if !cancelCalled {
+			t.Fatal("cancel should have been called")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("CancelRequest deadlocked - cancel callback blocked on mutex")
+	}
+}

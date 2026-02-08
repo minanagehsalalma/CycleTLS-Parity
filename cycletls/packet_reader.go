@@ -24,8 +24,23 @@ var ErrNegativeLength = errors.New("packet: negative length")
 // This prevents unbounded memory allocation from malformed packets.
 const MaxReadBytes = 10 * 1024 * 1024
 
+// MinInitialWindow is the minimum allowed initial window size (1 KB).
+const MinInitialWindow uint32 = 1024
+
+// MaxInitialWindow is the maximum allowed initial window size (100 MB).
+const MaxInitialWindow uint32 = 100 * 1024 * 1024
+
 // ErrBytesTooLarge is returned when a ReadBytes length exceeds MaxReadBytes.
 var ErrBytesTooLarge = errors.New("packet: read bytes length exceeds 10MB limit")
+
+// ErrWindowTooSmall is returned when the initial window size is below the minimum.
+var ErrWindowTooSmall = errors.New("packet: initial window size too small (minimum 1KB)")
+
+// ErrWindowTooLarge is returned when the initial window size exceeds the maximum.
+var ErrWindowTooLarge = errors.New("packet: initial window size too large (maximum 100MB)")
+
+// ErrTrailingBytes is returned when a parsed message has unconsumed trailing bytes.
+var ErrTrailingBytes = errors.New("packet: unexpected trailing bytes")
 
 // Reader allows sequential reading of typed values from a binary buffer.
 //
@@ -168,9 +183,22 @@ func parseInitMessage(data []byte) (cycleTLSRequest, uint32, error) {
 		return cycleTLSRequest{}, 0, err
 	}
 
+	// Validate initial window size range
+	if initialWindow < MinInitialWindow {
+		return cycleTLSRequest{}, 0, ErrWindowTooSmall
+	}
+	if initialWindow > MaxInitialWindow {
+		return cycleTLSRequest{}, 0, ErrWindowTooLarge
+	}
+
 	optionsJSON, err := r.ReadString()
 	if err != nil {
 		return cycleTLSRequest{}, 0, err
+	}
+
+	// Check for trailing bytes
+	if r.Remaining() > 0 {
+		return cycleTLSRequest{}, 0, ErrTrailingBytes
 	}
 
 	var opts Options
@@ -205,6 +233,11 @@ func parseCreditMessage(data []byte) (string, uint32, error) {
 	credits, err := r.ReadU32()
 	if err != nil {
 		return "", 0, err
+	}
+
+	// Check for trailing bytes
+	if r.Remaining() > 0 {
+		return "", 0, ErrTrailingBytes
 	}
 
 	return requestID, credits, nil
@@ -291,6 +324,11 @@ func parseClientMessage(data []byte) (ClientMessage, error) {
 
 	default:
 		return ClientMessage{}, fmt.Errorf("unknown method %q", method)
+	}
+
+	// Check for trailing bytes
+	if r.Remaining() > 0 {
+		return ClientMessage{}, ErrTrailingBytes
 	}
 
 	return msg, nil

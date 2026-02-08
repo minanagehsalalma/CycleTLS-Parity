@@ -45,11 +45,16 @@ func (s *frameSender) send(buf []byte) bool {
 
 // creditWindow is a weighted semaphore for flow control.
 // A nil pointer represents infinite credit capacity.
+//
+// Uses a channel-based broadcast mechanism instead of sync.Cond to allow
+// integration with context cancellation without spawning per-Acquire goroutines.
 type creditWindow struct {
 	mu     sync.Mutex
-	cond   *sync.Cond
 	window int64
 	closed bool
+	// broadcast is a channel that gets closed to wake all waiters (replaces sync.Cond).
+	// After closing, a new channel is created for the next round of waiters.
+	broadcast chan struct{}
 }
 
 // newCreditWindow creates a new credit window with the specified initial capacity.
@@ -58,11 +63,10 @@ func newCreditWindow(initial int64) *creditWindow {
 		panic("creditWindow: negative initial window")
 	}
 
-	cw := &creditWindow{
-		window: initial,
+	return &creditWindow{
+		window:    initial,
+		broadcast: make(chan struct{}),
 	}
-	cw.cond = sync.NewCond(&cw.mu)
-	return cw
 }
 
 // guard checks if the request is trivial or infinite.
@@ -70,44 +74,52 @@ func (cw *creditWindow) guard(n int64) bool {
 	return cw == nil || n <= 0
 }
 
+// wake closes the current broadcast channel and creates a new one.
+// Caller must hold cw.mu.
+func (cw *creditWindow) wake() {
+	close(cw.broadcast)
+	cw.broadcast = make(chan struct{})
+}
+
 // Acquire blocks until n credits are available, then consumes them atomically.
-// The wait is cancellable via the context.
+// The wait is cancellable via the context. No goroutines are spawned.
 func (cw *creditWindow) Acquire(n int64, ctx context.Context) error {
 	if cw.guard(n) {
 		return nil
 	}
 
 	cw.mu.Lock()
-	defer cw.mu.Unlock()
-
-	// Start a goroutine to watch for context cancellation
-	// and wake up the condition when cancelled
-	done := make(chan struct{})
-	defer close(done)
-
-	go func() {
-		select {
-		case <-ctx.Done():
-			cw.cond.Broadcast()
-		case <-done:
-		}
-	}()
-
 	for {
 		if cw.closed {
+			cw.mu.Unlock()
 			return ErrWindowClosed
 		}
 
 		if cw.window >= n {
 			cw.window -= n
+			cw.mu.Unlock()
 			return nil
 		}
 
 		if err := ctx.Err(); err != nil {
+			cw.mu.Unlock()
 			return err
 		}
 
-		cw.cond.Wait()
+		// Grab the current broadcast channel while holding the lock.
+		// When Add or Close is called, this channel will be closed.
+		ch := cw.broadcast
+		cw.mu.Unlock()
+
+		// Wait for either a broadcast or context cancellation without holding the lock.
+		select {
+		case <-ch:
+			// Credits may have been added or window closed - re-check
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		cw.mu.Lock()
 	}
 }
 
@@ -130,8 +142,15 @@ func (cw *creditWindow) TryAcquire(n int64) bool {
 
 // Add adds credits and wakes up waiting goroutines.
 // Includes overflow protection: saturates at MaxInt64 instead of wrapping.
+// Panics on negative values. Zero is a no-op.
 func (cw *creditWindow) Add(n int64) {
-	if cw.guard(n) {
+	if cw == nil {
+		return
+	}
+	if n < 0 {
+		panic("creditWindow: negative credit value")
+	}
+	if n == 0 {
 		return
 	}
 
@@ -148,7 +167,7 @@ func (cw *creditWindow) Add(n int64) {
 	} else {
 		cw.window += n
 	}
-	cw.cond.Broadcast()
+	cw.wake()
 }
 
 // Close logically closes the window and wakes all waiters.
@@ -165,5 +184,5 @@ func (cw *creditWindow) Close() {
 	}
 
 	cw.closed = true
-	cw.cond.Broadcast()
+	cw.wake()
 }

@@ -35,16 +35,23 @@ func RequestTrackerMaxSize() int {
 // If the tracker is at capacity, stale entries are evicted first.
 func RegisterRequest(id string, cancel context.CancelFunc) {
 	activeRequestsMutex.Lock()
-	defer activeRequestsMutex.Unlock()
 
 	// Evict if at capacity
+	var evictedCancel context.CancelFunc
 	if len(activeRequests) >= maxActiveRequests {
-		evictOldestRequestLocked()
+		evictedCancel = evictOldestRequestLocked()
 	}
 
 	activeRequests[id] = requestEntry{
 		cancel:       cancel,
 		registeredAt: time.Now(),
+	}
+
+	activeRequestsMutex.Unlock()
+
+	// Call evicted cancel outside the lock
+	if evictedCancel != nil {
+		evictedCancel()
 	}
 }
 
@@ -58,12 +65,18 @@ func UnregisterRequest(id string) {
 
 // CancelRequest cancels and removes a request from the tracker.
 // Returns true if the request was found and cancelled, false otherwise.
+// The cancel function is called after releasing the mutex to prevent deadlock
+// if the cancel callback tries to interact with the tracker.
 func CancelRequest(id string) bool {
 	activeRequestsMutex.Lock()
-	defer activeRequestsMutex.Unlock()
-	if entry, exists := activeRequests[id]; exists {
-		entry.cancel()
+	entry, exists := activeRequests[id]
+	if exists {
 		delete(activeRequests, id)
+	}
+	activeRequestsMutex.Unlock()
+
+	if exists {
+		entry.cancel()
 		return true
 	}
 	return false
@@ -71,26 +84,32 @@ func CancelRequest(id string) bool {
 
 // CleanupStaleRequests removes entries older than maxAge and cancels them.
 // Returns the number of entries removed.
+// Cancel functions are called after releasing the mutex to prevent deadlock.
 func CleanupStaleRequests(maxAge time.Duration) int {
 	activeRequestsMutex.Lock()
-	defer activeRequestsMutex.Unlock()
 
 	cutoff := time.Now().Add(-maxAge)
-	removed := 0
+	var toCancel []context.CancelFunc
 
 	for id, entry := range activeRequests {
 		if entry.registeredAt.Before(cutoff) {
-			entry.cancel()
+			toCancel = append(toCancel, entry.cancel)
 			delete(activeRequests, id)
-			removed++
 		}
 	}
 
-	if removed > 0 {
-		log.Printf("state: cleaned up %d stale requests (older than %v)", removed, maxAge)
+	activeRequestsMutex.Unlock()
+
+	// Call cancel functions outside the lock
+	for _, cancel := range toCancel {
+		cancel()
 	}
 
-	return removed
+	if len(toCancel) > 0 {
+		log.Printf("state: cleaned up %d stale requests (older than %v)", len(toCancel), maxAge)
+	}
+
+	return len(toCancel)
 }
 
 // recordRequestTime sets the registration time for a request (used in tests).
@@ -103,9 +122,10 @@ func recordRequestTime(id string, t time.Time) {
 	}
 }
 
-// evictOldestRequestLocked removes the oldest entry from the map.
-// Caller must hold activeRequestsMutex.
-func evictOldestRequestLocked() {
+// evictOldestRequestLocked removes the oldest entry from the map and returns
+// its cancel function. Caller must hold activeRequestsMutex.
+// The caller should invoke the returned cancel function after releasing the mutex.
+func evictOldestRequestLocked() context.CancelFunc {
 	var oldestID string
 	var oldestTime time.Time
 	first := true
@@ -120,8 +140,9 @@ func evictOldestRequestLocked() {
 
 	if !first {
 		if entry, exists := activeRequests[oldestID]; exists {
-			entry.cancel()
 			delete(activeRequests, oldestID)
+			return entry.cancel
 		}
 	}
+	return nil
 }

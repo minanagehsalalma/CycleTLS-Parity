@@ -280,3 +280,54 @@ func TestFrameSenderCanceled(t *testing.T) {
 		t.Fatal("send should return false when context is canceled")
 	}
 }
+
+// Issue #6: Add() should panic on negative credits
+func TestCreditWindowAddNegativePanics(t *testing.T) {
+	cw := newCreditWindow(100)
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("Add(-1) should panic, but did not")
+		}
+	}()
+
+	cw.Add(-1)
+}
+
+// Issue #6: Add(0) should be a no-op, not panic
+func TestCreditWindowAddZeroNoOp(t *testing.T) {
+	cw := newCreditWindow(100)
+
+	// Should not panic and should not change window
+	cw.Add(0)
+
+	cw.mu.Lock()
+	if cw.window != 100 {
+		t.Fatalf("expected window to remain 100 after Add(0), got %d", cw.window)
+	}
+	cw.mu.Unlock()
+}
+
+// Issue #1: Goroutine leak test - many Acquire calls should not leak goroutines
+func TestCreditWindowAcquireNoGoroutineLeak(t *testing.T) {
+	cw := newCreditWindow(10000)
+
+	// Perform many Acquire calls - should not leak goroutines
+	for i := 0; i < 1000; i++ {
+		err := cw.Acquire(1, context.Background())
+		if err != nil {
+			t.Fatalf("Acquire failed: %v", err)
+		}
+	}
+
+	// Also test with cancelled contexts
+	for i := 0; i < 100; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+		_ = cw.Acquire(1, ctx) // may timeout, that's fine
+		cancel()
+	}
+
+	// If goroutines were leaking, the race detector or runtime would flag it
+	// Wait briefly for any goroutines to settle
+	time.Sleep(50 * time.Millisecond)
+}

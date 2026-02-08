@@ -54,6 +54,10 @@ func doRequestWithHeaderTimeout(
 	}
 
 	ctx, cancel = ensureContext(ctx, cancel, req)
+	// Always clean up the context when this function returns.
+	// This prevents context leaks when ensureContext creates a new cancel function.
+	defer cancel()
+
 	req = req.WithContext(ctx)
 
 	resultCh := make(chan requestResult, 1)
@@ -69,7 +73,6 @@ func doRequestWithHeaderTimeout(
 	case result := <-resultCh:
 		return result.resp, result.err
 	case <-timer.C:
-		cancel()
 		return nil, context.DeadlineExceeded
 	case <-ctx.Done():
 		return nil, ctx.Err()

@@ -569,7 +569,12 @@ func dispatcherAsyncV2(res fullRequest, sender *frameSender) {
 	}
 
 	// Send response frame
-	if !sender.send(buildResponseFrame(res.options.RequestID, resp.StatusCode, finalUrl, resp.Header)) {
+	responseFrame, err := buildResponseFrame(res.options.RequestID, resp.StatusCode, finalUrl, resp.Header)
+	if err != nil {
+		sender.send(buildErrorFrame(res.options.RequestID, 500, err.Error()))
+		return
+	}
+	if !sender.send(responseFrame) {
 		return
 	}
 
@@ -635,7 +640,12 @@ func dispatchSSEAsyncV2(res fullRequest, sender *frameSender) {
 	}
 
 	// Send response frame with headers
-	if !sender.send(buildResponseFrame(res.options.RequestID, resp.StatusCode, finalUrl, resp.Header)) {
+	responseFrame, err := buildResponseFrame(res.options.RequestID, resp.StatusCode, finalUrl, resp.Header)
+	if err != nil {
+		sender.send(buildErrorFrame(res.options.RequestID, 500, err.Error()))
+		return
+	}
+	if !sender.send(responseFrame) {
 		return
 	}
 
@@ -716,14 +726,26 @@ func dispatchWebSocketAsyncV2(res fullRequest, sender *frameSender) {
 	state.RegisterWebSocket(requestID, conn)
 
 	// Issue #5: Send initial response with headers, send error frame on failure
-	if !sender.send(buildResponseFrame(requestID, resp.StatusCode, res.options.Options.URL, resp.Header)) {
+	wsResponseFrame, wsRespErr := buildResponseFrame(requestID, resp.StatusCode, res.options.Options.URL, resp.Header)
+	if wsRespErr != nil {
+		sender.send(buildWebSocketErrorFrame(requestID, 500, wsRespErr.Error()))
+		sender.send(buildEndFrame(requestID))
+		return
+	}
+	if !sender.send(wsResponseFrame) {
 		sender.send(buildWebSocketErrorFrame(requestID, 0, "failed to send response frame"))
 		sender.send(buildEndFrame(requestID))
 		return
 	}
 
 	// Issue #5: Send ws_open event, send error frame on failure
-	if !sender.send(buildWebSocketOpenFrame(requestID, negotiatedProtocol, negotiatedExtensions)) {
+	wsOpenFrame, wsOpenErr := buildWebSocketOpenFrame(requestID, negotiatedProtocol, negotiatedExtensions)
+	if wsOpenErr != nil {
+		sender.send(buildWebSocketErrorFrame(requestID, 0, wsOpenErr.Error()))
+		sender.send(buildEndFrame(requestID))
+		return
+	}
+	if !sender.send(wsOpenFrame) {
 		sender.send(buildWebSocketErrorFrame(requestID, 0, "failed to send ws_open frame"))
 		sender.send(buildEndFrame(requestID))
 		return
@@ -751,20 +773,30 @@ func dispatchWebSocketAsyncV2(res fullRequest, sender *frameSender) {
 	readerCtx, readerCancel := context.WithCancel(ctx)
 	defer readerCancel() // Ensures reader goroutine exits when main loop returns
 
-	// Channel for messages read from the target WebSocket
+	// Channel for messages read from the target WebSocket.
+	// Buffer of 2 prevents the reader goroutine from blocking when the main loop
+	// exits: one slot for the in-flight message, one for the post-cancellation read.
 	type wsReadResult struct {
 		messageType int
 		data        []byte
 		err         error
 	}
-	readCh := make(chan wsReadResult, 1)
+	readCh := make(chan wsReadResult, 2)
 
-	// Issue #2: Reader goroutine with explicit cancellation via readerCtx
+	// Reader goroutine with explicit cancellation via readerCtx.
+	// When readerCancel is called, conn.ReadMessage may still be blocking;
+	// the buffered channel ensures the goroutine can send its final result
+	// without blocking, and the context check prevents further iteration.
 	go func() {
 		defer close(readCh) // Signal main loop that reader has exited
 		for {
 			_ = conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
 			messageType, message, err := conn.ReadMessage()
+
+			// Check context before attempting send to exit promptly
+			if readerCtx.Err() != nil {
+				return
+			}
 
 			select {
 			case readCh <- wsReadResult{messageType, message, err}:
@@ -782,7 +814,9 @@ func dispatchWebSocketAsyncV2(res fullRequest, sender *frameSender) {
 	for {
 		select {
 		case <-ctx.Done():
-			sender.send(buildWebSocketCloseFrame(requestID, 1000, "Context canceled"))
+			if closeFrame, err := buildWebSocketCloseFrame(requestID, 1000, "Context canceled"); err == nil {
+				sender.send(closeFrame)
+			}
 			sender.send(buildEndFrame(requestID))
 			return
 
@@ -820,7 +854,9 @@ func dispatchWebSocketAsyncV2(res fullRequest, sender *frameSender) {
 				if err != nil {
 					debugLogger.Printf("WebSocket close error: %s", err.Error())
 				}
-				sender.send(buildWebSocketCloseFrame(requestID, closeCode, cmd.CloseReason))
+				if closeFrame, err := buildWebSocketCloseFrame(requestID, closeCode, cmd.CloseReason); err == nil {
+					sender.send(closeFrame)
+				}
 				sender.send(buildEndFrame(requestID))
 				return
 			}
@@ -837,7 +873,9 @@ func dispatchWebSocketAsyncV2(res fullRequest, sender *frameSender) {
 				}
 
 				if websocket.IsCloseError(msg.err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					sender.send(buildWebSocketCloseFrame(requestID, websocket.CloseNormalClosure, "Connection closed normally"))
+					if closeFrame, err := buildWebSocketCloseFrame(requestID, websocket.CloseNormalClosure, "Connection closed normally"); err == nil {
+						sender.send(closeFrame)
+					}
 				} else {
 					debugLogger.Printf("WebSocket read error: %s", msg.err.Error())
 					sender.send(buildWebSocketErrorFrame(requestID, 0, msg.err.Error()))
