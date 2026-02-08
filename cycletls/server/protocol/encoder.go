@@ -4,6 +4,8 @@ package protocol
 
 import (
 	"bytes"
+	"fmt"
+	"math"
 	"sync"
 )
 
@@ -41,17 +43,41 @@ func putBuffer(buf *bytes.Buffer) {
 	bufferPool.Put(buf)
 }
 
-// Helper functions for encoding
+// Helper functions for encoding.
+// writeUint16 writes a 16-bit value. Callers must ensure v is in range [0, 65535].
+// For untrusted input, use safeWriteUint16 instead.
 func writeUint16(b *bytes.Buffer, v int) {
 	b.WriteByte(byte(v >> 8))
 	b.WriteByte(byte(v))
 }
 
+// writeUint32 writes a 32-bit value. Callers must ensure v is in range [0, 4294967295].
+// For untrusted input, use safeWriteUint32 instead.
 func writeUint32(b *bytes.Buffer, v int) {
 	b.WriteByte(byte(v >> 24))
 	b.WriteByte(byte(v >> 16))
 	b.WriteByte(byte(v >> 8))
 	b.WriteByte(byte(v))
+}
+
+// safeWriteUint16 writes a 16-bit value with bounds checking.
+// Returns an error if v is negative or exceeds math.MaxUint16 (65535).
+func safeWriteUint16(b *bytes.Buffer, v int) error {
+	if v < 0 || v > math.MaxUint16 {
+		return fmt.Errorf("protocol: value %d overflows uint16 (range 0-%d)", v, math.MaxUint16)
+	}
+	writeUint16(b, v)
+	return nil
+}
+
+// safeWriteUint32 writes a 32-bit value with bounds checking.
+// Returns an error if v is negative or exceeds math.MaxUint32 (4294967295).
+func safeWriteUint32(b *bytes.Buffer, v int) error {
+	if v < 0 || v > math.MaxUint32 {
+		return fmt.Errorf("protocol: value %d overflows uint32 (range 0-%d)", v, uint64(math.MaxUint32))
+	}
+	writeUint32(b, v)
+	return nil
 }
 
 func writeRequestID(b *bytes.Buffer, requestID string) {

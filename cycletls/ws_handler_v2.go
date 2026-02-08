@@ -22,7 +22,91 @@ const (
 	writeWait = 10 * time.Second
 	// requestTimeout is the maximum duration for a single request.
 	requestTimeout = 2 * time.Hour
+	// MaxCreditsPerMessage is the maximum credit value a client can send in a
+	// single credit message (1 GB). This prevents a malicious client from
+	// sending MAX_UINT32 credits to exhaust server resources.
+	MaxCreditsPerMessage uint32 = 1 << 30 // 1 GiB
 )
+
+// validateCredits checks that a credit value is within the allowed range.
+func validateCredits(credits uint32) error {
+	if credits > MaxCreditsPerMessage {
+		return fmt.Errorf("credits %d exceed maximum allowed %d", credits, MaxCreditsPerMessage)
+	}
+	return nil
+}
+
+// safeCommandSender wraps a WebSocket command channel with a mutex to
+// prevent data races between concurrent sends and close operations.
+type safeCommandSender struct {
+	mu     sync.Mutex
+	ch     chan WebSocketCommandV2
+	closed bool
+}
+
+// newSafeCommandSender creates a new safe command sender wrapping the given channel.
+func newSafeCommandSender(ch chan WebSocketCommandV2) *safeCommandSender {
+	return &safeCommandSender{ch: ch}
+}
+
+// safeSendCommand sends a command to the channel. Returns true if the send
+// succeeded, false if the channel is closed or full.
+func safeSendCommand(ch chan WebSocketCommandV2, cmd WebSocketCommandV2) bool {
+	// For standalone channel use (no safeCommandSender), use recover pattern
+	return safeSendCommandDirect(ch, cmd)
+}
+
+// safeSendCommandDirect sends without mutex protection, using recover for
+// backward compatibility with code that doesn't use safeCommandSender.
+func safeSendCommandDirect(ch chan WebSocketCommandV2, cmd WebSocketCommandV2) (sent bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			sent = false
+		}
+	}()
+	select {
+	case ch <- cmd:
+		return true
+	default:
+		return false
+	}
+}
+
+// Send sends a command through the protected channel. Thread-safe.
+func (s *safeCommandSender) Send(cmd WebSocketCommandV2) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	select {
+	case s.ch <- cmd:
+		return true
+	default:
+		return false
+	}
+}
+
+// Close closes the channel. Safe to call multiple times.
+func (s *safeCommandSender) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		s.closed = true
+		close(s.ch)
+	}
+}
+
+// safeCloseCommandCh closes a WebSocket command channel without panicking
+// if it was already closed.
+func safeCloseCommandCh(ch chan WebSocketCommandV2) {
+	defer func() {
+		if r := recover(); r != nil {
+			// channel was already closed - safe to ignore
+		}
+	}()
+	close(ch)
+}
 
 // -----------------------------------------------------------------------------
 // WebSocket abstraction for v2 flow control
@@ -187,6 +271,7 @@ func handleWSRequestV2(ws *websocket.Conn) {
 	g.Go(func() error {
 		ticker := time.NewTicker(pingPeriod)
 		defer ticker.Stop()
+		defer close(controlCh) // Ensure writer goroutine unblocks when ping exits
 
 		for {
 			select {
@@ -271,7 +356,8 @@ func handleWSRequestV2(ws *websocket.Conn) {
 	g.Go(func() error {
 		defer cancel()
 		if wsCommandCh != nil {
-			defer close(wsCommandCh)
+			// Use safe close to prevent panic if channel is already closed
+			defer safeCloseCommandCh(wsCommandCh)
 		}
 
 		debugLogger.Printf("[V2 Reader] Starting, isWebSocket=%v, protocol=%s", isWebSocket, req.Options.Protocol)
@@ -289,37 +375,51 @@ func handleWSRequestV2(ws *websocket.Conn) {
 
 				switch msg.Method {
 				case "credit":
+					// Issue #8: Validate credit values before applying
+					if err := validateCredits(msg.Credits); err != nil {
+						debugLogger.Printf("[V2 Reader] Invalid credits: %v", err)
+						return err
+					}
 					limiter.Add(int64(msg.Credits))
 				case "ws_send":
 					debugLogger.Printf("[V2 Reader] Forwarding ws_send: type=%d, len=%d", msg.MessageType, len(msg.Data))
-					// Forward send command to dispatcher
-					select {
-					case wsCommandCh <- WebSocketCommandV2{
+					// Issue #6: Use safe send to prevent panic on closed channel
+					if !safeSendCommand(wsCommandCh, WebSocketCommandV2{
 						Type:        "send",
 						MessageType: msg.MessageType,
 						Data:        msg.Data,
-					}:
-						debugLogger.Printf("[V2 Reader] ws_send forwarded successfully")
-					case <-ctx.Done():
-						return ctx.Err()
+					}) {
+						// Channel closed or full, check context
+						if ctx.Err() != nil {
+							return ctx.Err()
+						}
+						debugLogger.Printf("[V2 Reader] ws_send could not be forwarded, channel closed")
+						return nil
 					}
+					debugLogger.Printf("[V2 Reader] ws_send forwarded successfully")
 				case "ws_close":
 					debugLogger.Printf("[V2 Reader] Forwarding ws_close")
-					// Forward close command to dispatcher
-					select {
-					case wsCommandCh <- WebSocketCommandV2{
+					// Issue #6: Use safe send to prevent panic on closed channel
+					if !safeSendCommand(wsCommandCh, WebSocketCommandV2{
 						Type:        "close",
 						CloseCode:   msg.CloseCode,
 						CloseReason: msg.CloseReason,
-					}:
-					case <-ctx.Done():
-						return ctx.Err()
+					}) {
+						if ctx.Err() != nil {
+							return ctx.Err()
+						}
+						return nil
 					}
 				}
 			} else {
 				// For HTTP/SSE: only handle credit messages
 				credits, err := readCreditPacketV2(conn, req.RequestID)
 				if err != nil {
+					return err
+				}
+				// Issue #8: Validate credit values before applying
+				if err := validateCredits(credits); err != nil {
+					debugLogger.Printf("[V2 Reader] Invalid credits: %v", err)
 					return err
 				}
 				limiter.Add(int64(credits))
@@ -401,7 +501,11 @@ func dispatchHTTPRequestV2(request cycleTLSRequest, parentCtx context.Context) f
 		request.Options.Proxy,
 	)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("dispatchHTTPRequestV2: client creation failed: %v", err)
+		return fullRequest{
+			options: request,
+			err:     fmt.Errorf("failed to create HTTP client: %w", err),
+		}
 	}
 
 	// Build the HTTP request using the context-aware approach from the existing code
@@ -607,21 +711,28 @@ func dispatchWebSocketAsyncV2(res fullRequest, sender *frameSender) {
 	negotiatedProtocol := resp.Header.Get("Sec-WebSocket-Protocol")
 	negotiatedExtensions := resp.Header.Get("Sec-WebSocket-Extensions")
 
-	// Register the WebSocket connection for state tracking
+	// Issue #3: Register both request and WebSocket for state tracking
 	state.RegisterRequest(requestID, res.cancel)
+	state.RegisterWebSocket(requestID, conn)
 
-	// Send initial response with headers
+	// Issue #5: Send initial response with headers, send error frame on failure
 	if !sender.send(buildResponseFrame(requestID, resp.StatusCode, res.options.Options.URL, resp.Header)) {
+		sender.send(buildWebSocketErrorFrame(requestID, 0, "failed to send response frame"))
+		sender.send(buildEndFrame(requestID))
 		return
 	}
 
-	// Send ws_open event
+	// Issue #5: Send ws_open event, send error frame on failure
 	if !sender.send(buildWebSocketOpenFrame(requestID, negotiatedProtocol, negotiatedExtensions)) {
+		sender.send(buildWebSocketErrorFrame(requestID, 0, "failed to send ws_open frame"))
+		sender.send(buildEndFrame(requestID))
 		return
 	}
 
 	// If there's body data, send it as the first WebSocket message
 	if res.options.Options.Body != "" {
+		// Issue #7: Set write deadline before writing
+		_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
 		err := conn.WriteMessage(websocket.TextMessage, []byte(res.options.Options.Body))
 		if err != nil {
 			debugLogger.Printf("WebSocket write error: %s", err.Error())
@@ -636,26 +747,28 @@ func dispatchWebSocketAsyncV2(res fullRequest, sender *frameSender) {
 	// Read deadline timeout
 	const wsReadDeadline = 30 * time.Second
 
+	// Issue #2: Use context with cancel to ensure reader goroutine exits
+	readerCtx, readerCancel := context.WithCancel(ctx)
+	defer readerCancel() // Ensures reader goroutine exits when main loop returns
+
 	// Channel for messages read from the target WebSocket
-	readCh := make(chan struct {
+	type wsReadResult struct {
 		messageType int
 		data        []byte
 		err         error
-	}, 1)
+	}
+	readCh := make(chan wsReadResult, 1)
 
-	// Goroutine to read from target WebSocket
+	// Issue #2: Reader goroutine with explicit cancellation via readerCtx
 	go func() {
+		defer close(readCh) // Signal main loop that reader has exited
 		for {
-			conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
+			_ = conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
 			messageType, message, err := conn.ReadMessage()
 
 			select {
-			case readCh <- struct {
-				messageType int
-				data        []byte
-				err         error
-			}{messageType, message, err}:
-			case <-ctx.Done():
+			case readCh <- wsReadResult{messageType, message, err}:
+			case <-readerCtx.Done():
 				return
 			}
 
@@ -686,6 +799,8 @@ func dispatchWebSocketAsyncV2(res fullRequest, sender *frameSender) {
 				if cmd.MessageType == 2 {
 					msgType = websocket.BinaryMessage
 				}
+				// Issue #7: Set write deadline before writing
+				_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
 				err := conn.WriteMessage(msgType, cmd.Data)
 				if err != nil {
 					debugLogger.Printf("WebSocket send error: %s", err.Error())
@@ -698,6 +813,8 @@ func dispatchWebSocketAsyncV2(res fullRequest, sender *frameSender) {
 				if closeCode == 0 {
 					closeCode = websocket.CloseNormalClosure
 				}
+				// Issue #7: Set write deadline before writing
+				_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
 				err := conn.WriteMessage(websocket.CloseMessage,
 					websocket.FormatCloseMessage(closeCode, cmd.CloseReason))
 				if err != nil {
@@ -708,7 +825,11 @@ func dispatchWebSocketAsyncV2(res fullRequest, sender *frameSender) {
 				return
 			}
 
-		case msg := <-readCh:
+		case msg, ok := <-readCh:
+			if !ok {
+				// Reader goroutine exited and closed the channel
+				return
+			}
 			if msg.err != nil {
 				// Check if timeout - continue the loop
 				if netErr, ok := msg.err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
