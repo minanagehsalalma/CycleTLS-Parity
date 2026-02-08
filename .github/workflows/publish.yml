@@ -31,13 +31,8 @@ jobs:
           go-version: ${{ matrix.go-version }}
           cache: true
           cache-dependency-path: ./cycletls/go.sum
-      - name: Export Go
-        run: go env -w  GO111MODULE=on
-        working-directory: ./
-
       - name: Install golang dependencies
-        run: while read l; do go get -v "$l"; done < <(go list -f '{{ join .Imports "\n" }}' ./cycletls)
-        shell: bash
+        run: cd cycletls && go mod download && go mod verify
 
       - name: Install deps
         run: npm ci --unsafe-perm
@@ -51,7 +46,7 @@ jobs:
       - name: set name
         run: git config --global user.name 'Danny-Dasilva'
       - name: set email
-        run: git config --global user.email 'secrets.EMAIL'
+        run: git config --global user.email '${{ secrets.EMAIL }}'
       - name: bump version
         run: npm version patch -m "Release"
       - name: Retrieve Latest Version

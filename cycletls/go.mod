@@ -35,4 +35,6 @@ require (
 	golang.org/x/tools v0.35.0 // indirect
 )
 
+// Self-replace ensures local development uses the local module rather than
+// a published version, required because src/go.mod references this module path.
 replace github.com/Danny-Dasilva/CycleTLS/cycletls => ./

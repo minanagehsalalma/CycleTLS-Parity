@@ -1,6 +1,9 @@
 name: 🧪 Go Tests
 
-on: [push]
+on:
+  push:
+    branches: [main, 'version/**']
+  pull_request:
 
 jobs:
   go-unit:
@@ -31,7 +34,7 @@ jobs:
 
       - name: Unit Test
         working-directory: ./cycletls
-        run: go test --race -v ./...
+        run: go test -race -v ./...
 
   go-integration:
     name: Go Integration (soft-fail)
@@ -100,7 +103,7 @@ jobs:
         id: integration-tests
         working-directory: ./cycletls
         run: |
-          go test --race -v -tags=integration ./tests/integration/... -skip 'tlsfingerprint'
+          go test -race -v -tags=integration ./tests/integration/... -skip 'tlsfingerprint'
 
       - name: Report integration test results
         if: always()
@@ -138,4 +141,4 @@ jobs:
 
       - name: TLS Fingerprint Integration Tests
         working-directory: ./cycletls
-        run: go test --race -v -tags=integration ./tests/integration/tlsfingerprint/...
+        run: go test -race -v -tags=integration ./tests/integration/tlsfingerprint/...

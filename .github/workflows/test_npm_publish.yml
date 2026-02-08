@@ -24,13 +24,10 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
-      - name: Export Go
-        run: go env -w  GO111MODULE=on
-        working-directory: ./
-
-      - name: Install golang all deps
-        run: while read l; do go get -v "$l"; done < <(go list -f '{{ join .Imports "\n" }}' ./cycletls)
-        shell: bash
+          cache: true
+          cache-dependency-path: ./cycletls/go.sum
+      - name: Install golang dependencies
+        run: cd cycletls && go mod download && go mod verify
 
       - name: Install npm dependencies
         run: npm ci --unsafe-perm
