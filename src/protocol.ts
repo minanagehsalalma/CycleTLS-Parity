@@ -82,9 +82,6 @@ export function buildCreditPacket(requestId: string, credits: number): Buffer {
 
 /**
  * BufferReader simplifies parsing binary packets.
- */
-/**
- * BufferReader simplifies parsing binary packets.
  * Issue #2: All read methods include bounds checking to prevent underflows.
  */
 export class BufferReader {

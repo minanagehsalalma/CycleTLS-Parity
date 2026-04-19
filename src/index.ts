@@ -787,6 +787,7 @@ class SharedInstance extends EventEmitter {
 
       const spawnOptions: SpawnOptionsWithoutStdio = {
         env: {
+          ...process.env,
           WS_PORT: this.port.toString(),
           WS_AUTH_TOKEN: this.authToken, // Issue #4: Pass token to child process
         },
