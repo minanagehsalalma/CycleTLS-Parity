@@ -61,11 +61,30 @@ The upstream project already exposes strong primitives. This fork is about the p
 | Real gated target result | `403` in our browser-parity pass | ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) `200` once TLS/H2 parity and egress path matched |
 | Proof assets | general examples | ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) fork-specific case study, demo folder, and front-page proof graphic |
 
-## Quick Proof
+## What This Fixes In Practice
 
-- `tls.peet.ws` was used to verify JA3, JA4R, extension ordering, and `h2` fingerprints.
-- `tools.scrapfly.io` was used to verify header ordering.
-- a real protected target was used to validate whether parity survived outside toy probes.
+The original project could still complete the HTTP request on public fingerprint sites, but it did not always emit the browser fingerprint the caller asked for. That matters on stricter targets: a `200` from a fingerprint probe is not the same thing as a convincing browser profile.
+
+![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) This fork turns those silent fingerprint-control failures into closer Chrome/Firefox parity.
+
+| Scenario | Original behavior | This fork | Practical benefit |
+| --- | --- | --- | --- |
+| Chrome-style HTTP/2 profile | Reported `1:65536;3:1000;4:6291456;5:16384;6:262144\|15663105\|0\|m,a,s,p` | ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) Reports `1:65536;2:0;4:6291456;6:262144\|15663105\|0\|m,a,s,p` | Stops leaking old/default `MAX_CONCURRENT_STREAMS` and `MAX_FRAME_SIZE` settings when the caller asked for a Chrome-like profile. |
+| Firefox-style HTTP/2 profile | Missing `2:0` / `ENABLE_PUSH = 0` | ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) Includes `2:0` / `ENABLE_PUSH = 0` | Firefox H2 output is materially closer to the requested profile. |
+| Chrome UA vs Firefox UA | Both paths collapsed to the same TLS JA4: `t12d1515h2_8daaf6152771_4d8a99c1bc01` | ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) Chrome: `t13d1516h2_8daaf6152771_d8a2da3f94cd`; Firefox: `t13d1715h2_5b57614c22b0_5c2c66f702b0` | A Firefox user-agent no longer rides the same generic Chrome-ish/default TLS shape. |
+| Modern Chrome-like default path | Public probes saw an older `t12...` TLS shape | ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) Public probes see a modern `t13...` browser profile | Better parity for systems that score TLS generation, extensions, ALPN, H2 settings, and header order together. |
+| Real gated target validation | Browser-like inputs alone still hit `403` in our parity pass | ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) Returned `200` once TLS/H2 parity and egress identity matched | Proves the work is useful outside toy fingerprint endpoints. |
+
+### Live Probe Evidence
+
+The numbers above were checked against public fingerprint test sites:
+
+| Endpoint | Chrome before | Chrome after | Firefox before | Firefox after |
+| --- | --- | --- | --- | --- |
+| `tls.peet.ws` TLS JA4 | `t12d1515h2_8daaf6152771_4d8a99c1bc01` | `t13d1516h2_8daaf6152771_d8a2da3f94cd` | `t12d1515h2_8daaf6152771_4d8a99c1bc01` | `t13d1715h2_5b57614c22b0_5c2c66f702b0` |
+| `tools.scrapfly.io` TLS JA3 digest | `a046fe17d33822fb5db1a14b3e8d940a` | `dd3974b729ed1f6caf80a902f3d05128` | `a046fe17d33822fb5db1a14b3e8d940a` | `fc21b639f5d6037589b3fead714e5039` |
+
+No personal IPs, signed URLs, cookies, or target-specific secrets are included in the public proof.
 
 ## Fork Assets
 
