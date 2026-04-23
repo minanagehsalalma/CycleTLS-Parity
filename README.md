@@ -1,4 +1,4 @@
-# CycleTLS
+# CycleTLS Parity
 
 
 
@@ -6,10 +6,8 @@
 	<img src="docs/media/Banner.png" alt="CycleTLS"/>
 	<br>
 
-![build](https://github.com/Danny-Dasilva/CycleTLS/actions/workflows/test_golang.yml/badge.svg)
-[![GoDoc](http://img.shields.io/badge/go-documentation-blue.svg)](http://godoc.org/github.com/Danny-Dasilva/CycleTLS/cycletls) 
-[![license](https://img.shields.io/github/license/Danny-Dasilva/CycleTLS.svg)](https://github.com/Danny-Dasilva/CycleTLS/blob/main/LICENSE)
-[![Go Report Card](https://goreportcard.com/badge/github.com/Danny-Dasilva/CycleTLS/cycletls)](https://goreportcard.com/report/github.com/Danny-Dasilva/CycleTLS/cycletls)
+![build](https://github.com/minanagehsalalma/CycleTLS-Parity/actions/workflows/test_golang.yml/badge.svg)
+[![license](https://img.shields.io/github/license/minanagehsalalma/CycleTLS-Parity.svg)](https://github.com/minanagehsalalma/CycleTLS-Parity/blob/main/LICENSE)
 [![npm version](https://img.shields.io/npm/v/cycletls.svg)](https://www.npmjs.org/package/cycletls)
  <a href="https://discord.gg/gsmxMHrwhu">
   <img src="https://img.shields.io/discord/1100945880888115200?logo=discord"
@@ -31,7 +29,7 @@
   <a href="#example-cycletls-request-for-typescript-and-javascript"><strong>API Usage</strong></a>
 </div>
 
-If you have a API change or feature request feel free to open an [Issue](https://github.com/Danny-Dasilva/CycleTLS/issues/new/choose).
+If you have an API change or feature request, open an [Issue](https://github.com/minanagehsalalma/CycleTLS-Parity/issues/new/choose) in this fork.
 
 ![Browser parity showcase](docs/media/browser-parity-showcase.png)
 
@@ -39,13 +37,15 @@ If you have a API change or feature request feel free to open an [Issue](https:/
 
 This fork is for the high-friction targets where the original project got close, but not close enough.
 
+![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) marks the behavior, assets, and parity work that do not exist in the original repo.
+
 The focus here is not generic spoofing. The focus is **browser parity under hostile conditions**:
 
-- deterministic Chrome-style TLS shape
-- Chromium-like HTTP/2 settings and initial priority
-- stricter header ordering on the HTTP/2 path
-- proof against real gated targets, not just synthetic fingerprint sites
-- a documented parity workflow that includes egress-path debugging, not only JA3 tweaking
+- ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) deterministic Chrome-style TLS shape
+- ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) Chromium-like HTTP/2 settings and initial priority
+- ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) stricter header ordering on the HTTP/2 path
+- ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) proof against real gated targets, not just synthetic fingerprint sites
+- ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) a documented parity workflow that includes egress-path debugging, not only JA3 tweaking
 
 ## This Fork Vs Upstream
 
@@ -53,13 +53,13 @@ The upstream project already exposes strong primitives. This fork is about the p
 
 | Area | Upstream behavior in our parity test | This fork |
 | --- | --- | --- |
-| Chrome `ClientHello` behavior | close, but not deterministic enough for the target flow | deterministic modern Chrome-style `ClientHelloSpec` |
-| TLS extension ordering | configurable, but not aligned closely enough for our test target | aligned to observed Chromium ordering |
-| HTTP/2 settings | configurable in principle, but not emitted in the exact Chrome-like shape we needed | exact Chromium-style settings + connection flow |
-| Initial HEADERS priority | not Chrome-like in our test path | `exclusive=true`, `streamDep=0`, `weight=255` |
-| Regular header ordering on `h2` | could still be disturbed by request remarshal behavior | explicit order preserved, including lowercase `user-agent` |
-| Real gated target result | `403` in our browser-parity pass | `200` once TLS/H2 parity and egress path matched |
-| Proof assets | general examples | fork-specific case study, demo folder, and front-page proof graphic |
+| Chrome `ClientHello` behavior | close, but not deterministic enough for the target flow | ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) deterministic modern Chrome-style `ClientHelloSpec` |
+| TLS extension ordering | configurable, but not aligned closely enough for our test target | ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) aligned to observed Chromium ordering |
+| HTTP/2 settings | configurable in principle, but not emitted in the exact Chrome-like shape we needed | ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) exact Chromium-style settings + connection flow |
+| Initial HEADERS priority | not Chrome-like in our test path | ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) `exclusive=true`, `streamDep=0`, `weight=255` |
+| Regular header ordering on `h2` | could still be disturbed by request remarshal behavior | ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) explicit order preserved, including lowercase `user-agent` |
+| Real gated target result | `403` in our browser-parity pass | ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) `200` once TLS/H2 parity and egress path matched |
+| Proof assets | general examples | ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) fork-specific case study, demo folder, and front-page proof graphic |
 
 ## Quick Proof
 
@@ -69,8 +69,8 @@ The upstream project already exposes strong primitives. This fork is about the p
 
 ## Fork Assets
 
-- [Browser parity case study](docs/browser-parity-case-study.md)
-- [Browser parity demo folder](examples/browser-parity/README.md)
+- ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) [Browser parity case study](docs/browser-parity-case-study.md)
+- ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) [Browser parity demo folder](examples/browser-parity/README.md)
 
 ## Features
 
@@ -86,7 +86,7 @@ The upstream project already exposes strong primitives. This fork is about the p
 
 ## Browser Parity Case Study
 
-- [Heavy fingerprinting: from partial spoofing to browser parity](docs/browser-parity-case-study.md)
+- ![Fork-only](https://img.shields.io/badge/fork-only-1f9d55) [Heavy fingerprinting: from partial spoofing to browser parity](docs/browser-parity-case-study.md)
   This fork includes a documented parity pass covering TLS shape, HTTP/2 framing, header order, and egress identity.
 
 
@@ -1253,7 +1253,7 @@ func main() {
 ```
 
 
-Feel free to open an [Issue](https://github.com/Danny-Dasilva/CycleTLS/issues/new/choose) with a feature request for specific file type support. 
+Feel free to open an [Issue](https://github.com/minanagehsalalma/CycleTLS-Parity/issues/new/choose) with a feature request for specific file type support. 
 </details>
 
 
@@ -1794,7 +1794,7 @@ func main() {
 
 Additional file type support is planned.
 
-Feel free to open an [Issue](https://github.com/Danny-Dasilva/CycleTLS/issues/new/choose) with a feature request for specific file type support. 
+Feel free to open an [Issue](https://github.com/minanagehsalalma/CycleTLS-Parity/issues/new/choose) with a feature request for specific file type support. 
 </details>
 
 ### How do I use Connection Reuse?
@@ -2543,7 +2543,7 @@ $ GOOS=linux GOARCH=arm go build -o ./dist/index ./golang && chmod +x ./dist/ind
 
 With the above command you can simply run `./index` and CycleTLS should function as intended.
 
-Use this [gist](https://gist.github.com/asukakenji/f15ba7e588ac42795f421b48b8aede63) for different Operating Systems that support cross-compilation and feel free to open an [Issue](https://github.com/Danny-Dasilva/CycleTLS/issues/new/choose) with a feature request for your specific operating system use case. 
+Use this [gist](https://gist.github.com/asukakenji/f15ba7e588ac42795f421b48b8aede63) for different Operating Systems that support cross-compilation and feel free to open an [Issue](https://github.com/minanagehsalalma/CycleTLS-Parity/issues/new/choose) with a feature request for your specific operating system use case. 
 
 </details>
 

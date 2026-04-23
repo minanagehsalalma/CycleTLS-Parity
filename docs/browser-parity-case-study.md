@@ -2,6 +2,8 @@
 
 This fork documents a real-world debugging pass where a target flow worked in Chromium but failed in `CycleTLS`, even after basic browser-style spoofing.
 
+All example IP addresses shown in the public docs and proof graphics are sanitized.
+
 ## Goal
 
 Make `CycleTLS` behave closely enough to a modern Chrome navigation request that a browser-protected flow could be reproduced outside the browser path.

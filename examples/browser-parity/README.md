@@ -40,7 +40,7 @@ node examples/browser-parity/demo.js
 ```text
 {
   "probe": {
-    "ip": "185.202.x.x:port",
+    "ip": "198.51.100.x:port",
     "http_version": "h2",
     "ja3": "...",
     "ja4_r": "...",
