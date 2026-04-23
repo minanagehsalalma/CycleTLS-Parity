@@ -1,10 +1,10 @@
-# Signed HLS Case Study: From `403` to `200`
+# Heavy Fingerprinting Case Study: From Partial Spoofing to Browser Parity
 
-This fork documents a real-world debugging pass where a signed HLS playlist returned `200` in Chromium but `403` in `CycleTLS`, even after basic header spoofing.
+This fork documents a real-world debugging pass where a target flow worked in Chromium but failed in `CycleTLS`, even after basic browser-style spoofing.
 
 ## Goal
 
-Make `CycleTLS` behave closely enough to a modern Chrome navigation request that a signed `.m3u8` playlist could be fetched successfully outside the browser path.
+Make `CycleTLS` behave closely enough to a modern Chrome navigation request that a browser-protected flow could be reproduced outside the browser path.
 
 ## What Changed
 
@@ -39,17 +39,17 @@ The final blocker turned out to be egress routing:
 
 - local Chrome was routed through a split-tunneled NordVPN path
 - `CycleTLS` was initially routed through the default system path
-- the signed HLS token was bound to the VPN egress range
+- the target access decision was bound to the VPN egress range
 
-Once the `CycleTLS` binary was added to NordVPN split tunneling, the same signed HLS flow started returning `200`.
+Once the `CycleTLS` binary was added to NordVPN split tunneling, the same protected flow started returning `200`.
 
 ## Verified Outcome
 
 With the patched binary and matching VPN egress:
 
 - `tls.peet.ws` reported the expected Chrome-like `h2` fingerprint
-- the signed HLS playlist returned `200`
-- response content-type was `application/vnd.apple.mpegurl`
+- the protected target flow returned `200`
+- the browser and `CycleTLS` paths converged on the same network identity constraints
 
 ## Why This Matters
 

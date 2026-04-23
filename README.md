@@ -5,11 +5,6 @@
 <div align="center">
 	<img src="docs/media/Banner.png" alt="CycleTLS"/>
 	<br>
-	
-Accepting Community Support and PR's
-
-	
-	
 
 ![build](https://github.com/Danny-Dasilva/CycleTLS/actions/workflows/test_golang.yml/badge.svg)
 [![GoDoc](http://img.shields.io/badge/go-documentation-blue.svg)](http://godoc.org/github.com/Danny-Dasilva/CycleTLS/cycletls) 
@@ -21,11 +16,45 @@ Accepting Community Support and PR's
 	  alt="chat on Discord"></a>
 </div>
 
-If you have a API change or feature request feel free to open an [Issue](https://github.com/Danny-Dasilva/CycleTLS/issues/new/choose)
+> High-control browser fingerprint impersonation for Node.js and Go.
+> Tune TLS, HTTP/2, QUIC, header order, and connection behavior when a plain user-agent spoof is nowhere near enough.
 
+<div align="center">
+  <a href="#installation"><strong>Install</strong></a>
+  ·
+  <a href="#example-cycletls-request-for-typescript-and-javascript"><strong>Quickstart</strong></a>
+  ·
+  <a href="#ja4r-raw-tls-fingerprinting"><strong>JA4R</strong></a>
+  ·
+  <a href="#http2-fingerprinting"><strong>HTTP/2</strong></a>
+  ·
+  <a href="docs/browser-parity-case-study.md"><strong>Browser Parity Case Study</strong></a>
+</div>
 
+If you have a API change or feature request feel free to open an [Issue](https://github.com/Danny-Dasilva/CycleTLS/issues/new/choose).
 
-# 🚀 Features
+## Why People Use CycleTLS
+
+- Impersonate real browser network stacks more closely than normal HTTP clients.
+- Control TLS shape with `ja3` and `ja4r`, not just surface headers.
+- Control HTTP/2 settings, flow, priority, and header ordering.
+- Reuse connections, speak WebSocket/SSE, and experiment with QUIC/HTTP/3.
+- Debug real-world parity problems where access depends on fingerprint plus network path.
+
+## This Fork Sharpens
+
+- deterministic modern Chrome-style `ClientHello` behavior
+- Chromium-like HTTP/2 settings and initial priority behavior
+- stricter regular-header ordering on the HTTP/2 path
+- a documented browser-parity case study that goes beyond simple header spoofing
+
+## Wire-Level Proof
+
+- `tls.peet.ws` for JA3, JA4R, extension ordering, and `h2` fingerprints
+- `tools.scrapfly.io` for header-order verification
+- real protected targets for parity validation under the correct egress path
+
+## Features
 
 - [High-performance](#-performance) Built-in goroutine pool used for handling asynchronous requests
 - Custom header ordering via [fhttp](https://github.com/useflyent/fhttp)
@@ -37,10 +66,10 @@ If you have a API change or feature request feel free to open an [Issue](https:/
 - Connection reuse
 - JA4 fingerprinting
 
-## Case Study
+## Browser Parity Case Study
 
-- [Signed HLS: from `403` to `200`](docs/streamruby-hls-case-study.md)
-  This fork includes a documented Chromium-parity + split-tunneling debugging pass against a signed HLS playlist.
+- [Heavy fingerprinting: from partial spoofing to browser parity](docs/browser-parity-case-study.md)
+  This fork includes a documented parity pass covering TLS shape, HTTP/2 framing, header order, and egress identity.
 
 
 Table of contents
