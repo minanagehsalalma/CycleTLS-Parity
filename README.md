@@ -37,6 +37,11 @@ If you have a API change or feature request feel free to open an [Issue](https:/
 - Connection reuse
 - JA4 fingerprinting
 
+## Case Study
+
+- [Signed HLS: from `403` to `200`](docs/streamruby-hls-case-study.md)
+  This fork includes a documented Chromium-parity + split-tunneling debugging pass against a signed HLS playlist.
+
 
 Table of contents
 =================
