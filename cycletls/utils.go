@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/textproto"
 	"strconv"
 	"strings"
 
@@ -130,6 +131,86 @@ func unBrotliData(data []byte) (resData []byte, err error) {
 	br := brotli.NewReader(bytes.NewReader(data))
 	respBody, err := io.ReadAll(br)
 	return respBody, err
+}
+
+func ModernChromeSpec(forceHTTP1 bool) *utls.ClientHelloSpec {
+	alpnProtocols := []string{"h2", "http/1.1"}
+	extensions := []utls.TLSExtension{
+		&utls.UtlsGREASEExtension{},
+		&utls.StatusRequestExtension{},
+		&utls.UtlsCompressCertExtension{Algorithms: []utls.CertCompressionAlgo{
+			utls.CertCompressionBrotli,
+		}},
+		&utls.SupportedVersionsExtension{Versions: []uint16{
+			utls.GREASE_PLACEHOLDER,
+			utls.VersionTLS13,
+			utls.VersionTLS12,
+		}},
+		&utls.RenegotiationInfoExtension{Renegotiation: utls.RenegotiateOnceAsClient},
+		&utls.SessionTicketExtension{},
+		&utls.ExtendedMasterSecretExtension{},
+		&utls.SCTExtension{},
+		&utls.SupportedCurvesExtension{Curves: []utls.CurveID{
+			utls.GREASE_PLACEHOLDER,
+			utls.X25519MLKEM768,
+			utls.X25519,
+			utls.CurveP256,
+			utls.CurveP384,
+		}},
+		utls.BoringGREASEECH(),
+		&utls.ALPNExtension{AlpnProtocols: alpnProtocols},
+		&utls.KeyShareExtension{KeyShares: []utls.KeyShare{
+			{Group: utls.CurveID(utls.GREASE_PLACEHOLDER), Data: []byte{0}},
+			{Group: utls.X25519MLKEM768},
+			{Group: utls.X25519},
+		}},
+		&utls.PSKKeyExchangeModesExtension{Modes: []uint8{utls.PskModeDHE}},
+		&utls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []utls.SignatureScheme{
+			utls.ECDSAWithP256AndSHA256,
+			utls.PSSWithSHA256,
+			utls.PKCS1WithSHA256,
+			utls.ECDSAWithP384AndSHA384,
+			utls.PSSWithSHA384,
+			utls.PKCS1WithSHA384,
+			utls.PSSWithSHA512,
+			utls.PKCS1WithSHA512,
+		}},
+		&utls.SupportedPointsExtension{SupportedPoints: []byte{0x00}},
+		&utls.ApplicationSettingsExtensionNew{SupportedProtocols: []string{"h2"}},
+		&utls.SNIExtension{},
+		&utls.UtlsGREASEExtension{},
+	}
+
+	if forceHTTP1 {
+		extensions[10] = &utls.ALPNExtension{AlpnProtocols: []string{"http/1.1"}}
+		extensions = append(extensions[:15], extensions[16:]...)
+	}
+
+	return &utls.ClientHelloSpec{
+		TLSVersMin:   utls.VersionTLS12,
+		TLSVersMax:   utls.VersionTLS13,
+		CipherSuites: []uint16{
+			utls.GREASE_PLACEHOLDER,
+			utls.TLS_AES_128_GCM_SHA256,
+			utls.TLS_AES_256_GCM_SHA384,
+			utls.TLS_CHACHA20_POLY1305_SHA256,
+			utls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			utls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			utls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			utls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			utls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			utls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			utls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+			utls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+			utls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+			utls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+			utls.TLS_RSA_WITH_AES_128_CBC_SHA,
+			utls.TLS_RSA_WITH_AES_256_CBC_SHA,
+		},
+		CompressionMethods: []byte{0x00},
+		Extensions:         extensions,
+		GetSessionID:       sha256.Sum256,
+	}
 }
 
 // StringToSpec creates a ClientHelloSpec based on a JA3 string
@@ -839,21 +920,34 @@ func ConvertUtlsConfig(utlsConfig *utls.Config) *tls.Config {
 // MarshalHeader preserves header order while converting to http.Header
 func MarshalHeader(h fhttp.Header, order []string) http.Header {
 	result := make(http.Header)
+	seen := make(map[string]bool)
 
 	// Add ordered headers first
 	for _, key := range order {
-		if values, ok := h[key]; ok {
-			result[key] = values
+		for existingKey, values := range h {
+			if strings.EqualFold(existingKey, key) {
+				result[existingKey] = values
+				seen[existingKey] = true
+				break
+			}
 		}
 	}
 
 	// Add remaining headers
 	for key, values := range h {
-		if _, exists := result[key]; !exists {
+		if !seen[key] {
 			result[key] = values
 		}
 	}
 
+	return result
+}
+
+func CanonicalHeaderOrder(order []string) []string {
+	result := make([]string, 0, len(order))
+	for _, key := range order {
+		result = append(result, textproto.CanonicalMIMEHeaderKey(key))
+	}
 	return result
 }
 

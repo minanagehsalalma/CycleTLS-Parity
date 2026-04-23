@@ -10,7 +10,7 @@ import (
 // HTTP2Fingerprint represents an HTTP/2 client fingerprint
 type HTTP2Fingerprint struct {
 	Settings         []http2.Setting
-	StreamDependency uint32
+	ConnectionFlow   uint32
 	Exclusive        bool
 	PriorityOrder    []string
 }
@@ -53,11 +53,11 @@ func NewHTTP2Fingerprint(fingerprint string) (*HTTP2Fingerprint, error) {
 		settings = append(settings, http2.Setting{ID: http2.SettingID(id), Val: val})
 	}
 
-	// Parse stream dependency
-	var streamDependency uint32
-	_, err := fmt.Sscanf(parts[1], "%d", &streamDependency)
+	// Parse connection flow increment
+	var connectionFlow uint32
+	_, err := fmt.Sscanf(parts[1], "%d", &connectionFlow)
 	if err != nil {
-		return nil, fmt.Errorf("invalid stream dependency: %s", parts[1])
+		return nil, fmt.Errorf("invalid connection flow: %s", parts[1])
 	}
 
 	// Parse exclusive flag
@@ -73,7 +73,7 @@ func NewHTTP2Fingerprint(fingerprint string) (*HTTP2Fingerprint, error) {
 
 	return &HTTP2Fingerprint{
 		Settings:         settings,
-		StreamDependency: streamDependency,
+		ConnectionFlow:   connectionFlow,
 		Exclusive:        exclusive,
 		PriorityOrder:    priorityOrder,
 	}, nil
@@ -97,15 +97,18 @@ func (f *HTTP2Fingerprint) String() string {
 	// Format priority order
 	priorityStr := strings.Join(f.PriorityOrder, ",")
 
-	return fmt.Sprintf("%s|%d|%d|%s", settingsStr, f.StreamDependency, exclusiveFlag, priorityStr)
+	return fmt.Sprintf("%s|%d|%d|%s", settingsStr, f.ConnectionFlow, exclusiveFlag, priorityStr)
 }
 
 // Apply configures the HTTP/2 connection with the specified fingerprint
 func (f *HTTP2Fingerprint) Apply(conn *http2.Transport) {
-	// Set HTTP/2 settings
-	conn.Settings = f.Settings
-
-	// Set priority and weight parameters
-	// Note: Currently dummy implementation as utls/http2 doesn't expose these directly
-	// In a real implementation, this would configure the priority tree
+	conn.HTTP2Settings = &http2.HTTP2Settings{
+		Settings:       f.Settings,
+		ConnectionFlow: int(f.ConnectionFlow),
+		HeaderPriority: &http2.PriorityParam{
+			Exclusive: true,
+			StreamDep: 0,
+			Weight:    255,
+		},
+	}
 }

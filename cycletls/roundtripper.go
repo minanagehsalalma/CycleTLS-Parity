@@ -77,12 +77,14 @@ func (rt *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 		req.AddCookie(cookie)
 	}
 
-	// Apply user agent
-	req.Header.Set("User-Agent", rt.UserAgent)
+	// Preserve lowercase user-agent so fhttp's header-order logic can place it correctly.
+	delete(req.Header, "User-Agent")
+	delete(req.Header, "user-agent")
+	req.Header["user-agent"] = []string{rt.UserAgent}
 
 	// Apply header order if specified (for regular headers, not pseudo-headers)
 	if len(rt.HeaderOrder) > 0 {
-		req.Header = ConvertHttpHeader(MarshalHeader(req.Header, rt.HeaderOrder))
+		req.Header[http.HeaderOrderKey] = rt.HeaderOrder
 
 		// Note: rt.HeaderOrder contains regular headers like "cache-control", "accept", etc.
 		// Do NOT overwrite http.PHeaderOrderKey which contains pseudo-headers like ":method", ":path"
@@ -236,6 +238,7 @@ func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.
 	}
 
 	var spec *utls.ClientHelloSpec
+	var helloID utls.ClientHelloID
 	var proactivelyUpgraded bool // Track if we proactively upgraded TLS 1.2 to 1.3
 
 	// Determine which fingerprint to use
@@ -265,23 +268,36 @@ func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.
 			return nil, err
 		}
 	} else {
-		// Default to Chrome fingerprint
-		spec, err = StringToSpec(DefaultChrome_JA3, rt.UserAgent, rt.ForceHTTP1)
-		if err != nil {
-			return nil, err
+		parsedUserAgent := parseUserAgent(rt.UserAgent)
+		switch parsedUserAgent.UserAgent {
+		case chrome:
+			spec = ModernChromeSpec(rt.ForceHTTP1)
+		case firefox:
+			helloID = utls.HelloFirefox_Auto
+		default:
+			spec, err = StringToSpec(DefaultChrome_JA3, rt.UserAgent, rt.ForceHTTP1)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
 	// Create TLS client
+	clientHelloID := utls.HelloCustom
+	if helloID.Client != "" {
+		clientHelloID = helloID
+	}
 	conn := utls.UClient(rawConn, &utls.Config{
 		ServerName:         serverName,
 		OmitEmptyPsk:       true,
 		InsecureSkipVerify: rt.InsecureSkipVerify,
-	}, utls.HelloCustom)
+	}, clientHelloID)
 
 	// Apply TLS fingerprint
-	if err := conn.ApplyPreset(spec); err != nil {
-		return nil, err
+	if spec != nil {
+		if err := conn.ApplyPreset(spec); err != nil {
+			return nil, err
+		}
 	}
 
 	// Perform TLS handshake
