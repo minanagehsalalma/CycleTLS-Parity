@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/textproto"
 	"strconv"
 	"strings"
 
@@ -182,8 +181,22 @@ func ModernChromeSpec(forceHTTP1 bool) *utls.ClientHelloSpec {
 	}
 
 	if forceHTTP1 {
-		extensions[10] = &utls.ALPNExtension{AlpnProtocols: []string{"http/1.1"}}
-		extensions = append(extensions[:15], extensions[16:]...)
+		// Find ALPN by type-assertion and downgrade to http/1.1 only.
+		// Drop ALPS (ApplicationSettingsExtensionNew) since it is HTTP/2 only.
+		// Iterating-by-type avoids index drift if the extension list changes
+		// (e.g. ECH at slot 9 was previously corrupted by hard-coded indices).
+		filtered := extensions[:0]
+		for _, ext := range extensions {
+			switch ext.(type) {
+			case *utls.ALPNExtension:
+				filtered = append(filtered, &utls.ALPNExtension{AlpnProtocols: []string{"http/1.1"}})
+			case *utls.ApplicationSettingsExtensionNew, *utls.ApplicationSettingsExtension:
+				// ALPS is HTTP/2-only; drop it for HTTP/1.1
+			default:
+				filtered = append(filtered, ext)
+			}
+		}
+		extensions = filtered
 	}
 
 	return &utls.ClientHelloSpec{
@@ -940,14 +953,6 @@ func MarshalHeader(h fhttp.Header, order []string) http.Header {
 		}
 	}
 
-	return result
-}
-
-func CanonicalHeaderOrder(order []string) []string {
-	result := make([]string, 0, len(order))
-	for _, key := range order {
-		result = append(result, textproto.CanonicalMIMEHeaderKey(key))
-	}
 	return result
 }
 
